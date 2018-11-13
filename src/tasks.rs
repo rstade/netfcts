@@ -38,16 +38,16 @@ pub struct KniHandleRequest {
 }
 
 impl Executable for KniHandleRequest {
-    fn execute(&mut self) -> u32 {
+    fn execute(&mut self) -> (u32, i32) {
         let now = utils::rdtsc_unsafe();
-        if now - self.last_tick >= 22700 * 1000 {
+        if now - self.last_tick >= 22700 * 1000 {  // roughly each 10 ms
             unsafe {
                 rte_kni_handle_request(self.kni_port.get_kni());
             };
             self.last_tick = now;
-            1
+            (1, 0)
         } else {
-            0
+            (0, 0)
         }
     }
 }
@@ -125,7 +125,7 @@ impl PacketInjector {
 }
 
 impl Executable for PacketInjector {
-    fn execute(&mut self) -> u32 {
+    fn execute(&mut self) -> (u32, i32) {
         let mut inserted = 0;
         // only enqeue new packets if queue has free slots for a full batch (currently we would otherwise create a memory leak)
         if (self.no_packets == 0 || self.sent_packets < self.no_packets) && self.producer.free_slots() >= INJECTOR_BATCH_SIZE {
@@ -140,7 +140,7 @@ impl Executable for PacketInjector {
             self.sent_packets += inserted;
             assert_eq!(inserted, INJECTOR_BATCH_SIZE);
         }
-        inserted as u32
+        (inserted as u32, self.producer.used_slots() as i32)
     }
 }
 
@@ -204,7 +204,7 @@ impl TickGenerator {
 }
 
 impl Executable for TickGenerator {
-    fn execute(&mut self) -> u32 {
+    fn execute(&mut self) -> (u32, i32) {
         let p;
         let now = utils::rdtsc_unsafe();
         if now - self.last_tick >= self.tick_length {
@@ -214,9 +214,9 @@ impl Executable for TickGenerator {
             self.producer.enqueue_one(p);
             self.last_tick = now;
             self.tick_count += 1;
-            1
+            (1, 0)
         } else {
-            0
+            (0, 0)
         }
     }
 }

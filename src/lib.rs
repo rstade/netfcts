@@ -119,7 +119,7 @@ impl ConRecord {
         &self.state[0..self.state_count]
     }
 
-    pub fn elapsed_since_synsent_or_synrecv(&self) -> Vec<u64> {
+    pub fn deltas_since_synsent_or_synrecv(&self) -> Vec<u64> {
         //let synsent = self.stamps[1];
         if self.state_count >= 3 {
             let vals= self.stamps[1..self.state_count].iter();
@@ -142,7 +142,7 @@ impl fmt::Display for ConRecord {
             self.states(),
             self.release_cause,
             self.stamps[1].separated_string(),
-            self.elapsed_since_synsent_or_synrecv()
+            self.deltas_since_synsent_or_synrecv()
                 .iter()
                 .map(|u| u.separated_string())
                 .collect::<Vec<_>>(),
