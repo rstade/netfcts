@@ -137,8 +137,9 @@ impl fmt::Display for ConRecord {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
             f,
-            "({:?}, port={}, {:?}, {:?}, {}, {:?})",
+            "({:?}, sock={:21}, port={}, {:?}, {:?}, {}, {:?})",
             self.role,
+            if self.sock.is_some() { self.sock.unwrap().to_string() } else { "none".to_string() },
             self.port,
             self.states(),
             self.release_cause,
