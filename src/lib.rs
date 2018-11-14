@@ -71,6 +71,7 @@ impl ConRecord {
         self.release_cause
     }
 
+    #[inline]
     pub fn new() -> ConRecord {
         ConRecord {
             role: TcpRole::Client,
@@ -150,7 +151,7 @@ impl fmt::Display for ConRecord {
     }
 }
 
-
+#[inline]
 pub fn is_kni_core(pci: &CacheAligned<PortQueue>) -> bool {
     pci.rxq() == 0
 }
@@ -250,6 +251,8 @@ pub enum FlowSteeringMode {
     Ip,
 }
 
+
+#[inline]
 fn get_tcp_port_base(port: &PmdPort , count: u16) -> u16 {
     let port_mask = port.get_tcp_dst_port_mask();
     port_mask - count * (!port_mask + 1)
