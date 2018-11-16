@@ -1,12 +1,12 @@
 use std::any::Any;
-use std::net::{SocketAddrV4,};
+use std::convert;
 use std::fmt;
 use std::fmt::Write;
-use std::convert;
+use std::net::SocketAddrV4;
 use std::ops::{Index, IndexMut};
 
-use uuid::Uuid;
 use eui48::MacAddress;
+use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
 pub enum TcpState {
@@ -153,7 +153,6 @@ pub struct CData {
     pub reply_socket: SocketAddrV4, // the socket on which the trafficengine expects the reply from the DUT
     pub client_port: u16,
     pub uuid: Option<Uuid>,
-
 }
 
 impl CData {
@@ -165,4 +164,3 @@ impl CData {
         }
     }
 }
-

@@ -1,12 +1,9 @@
+use e2d2::utils;
 use std::clone::Clone;
-use std::vec::Drain;
 use std::cmp::min;
 use std::fmt::Debug;
-use e2d2::utils;
+use std::vec::Drain;
 //use separator::Separatable;
-
-// TODO retrieve this system constant from Linux
-pub const MILLIS_TO_CYCLES: u64 = 2270000u64;
 
 /*
 pub fn duration_to_millis(dur: &Duration) -> u64 {
@@ -60,7 +57,8 @@ where
 
     #[inline]
     pub fn tick(&mut self, now: &u64) -> (Option<Drain<T>>, bool) {
-        if self.start != 0 { // only when the wheel has been started
+        if self.start != 0 {
+            // only when the wheel has been started
             let dur = *now - self.start;
             let advance = dur / self.resolution_cycles;
             //trace!("dur= {:?}, advance= {}, last_advance= {}", dur, advance, self.last_advance);
@@ -94,10 +92,12 @@ where
     where
         T: Debug,
     {
-        let now=utils::rdtsc_unsafe();
-        if self.start==0 { self.start=now-self.resolution_cycles; } //initialize start time
-        let dur = *after_cycles +  now - self.start;
-        let slots= dur/self.resolution_cycles-1;
+        let now = utils::rdtsc_unsafe();
+        if self.start == 0 {
+            self.start = now - self.resolution_cycles;
+        } //initialize start time
+        let dur = *after_cycles + now - self.start;
+        let slots = dur / self.resolution_cycles - 1;
         let slot = slots.wrapping_rem(self.no_slots as u64);
         //debug!("scheduling port {:?} at {:?} in slot {}", what, when.separated_string(), slot);
         self.slots[slot as usize].push(what);
@@ -116,6 +116,7 @@ mod tests {
     fn event_timing() {
         let start = utils::rdtsc_unsafe();
         println!("start = {:?}", start);
+        const MILLIS_TO_CYCLES: u64 = 2270000u64;
         let mut wheel: TimerWheel<u16> = TimerWheel::new(128, 16 * MILLIS_TO_CYCLES, 128);
 
         for j in 0..128 {

@@ -1,6 +1,6 @@
-extern crate uuid;
-extern crate eui48;
 extern crate e2d2;
+extern crate eui48;
+extern crate uuid;
 #[macro_use]
 extern crate serde_derive;
 #[macro_use]
@@ -8,28 +8,28 @@ extern crate log;
 extern crate ipnet;
 extern crate separator;
 
-pub mod tcp_common;
-pub mod tasks;
-pub mod timer_wheel;
 pub mod comm;
+pub mod tasks;
+pub mod tcp_common;
+pub mod timer_wheel;
+pub mod system;
 
-use std::process::Command;
-use std::net::{Ipv4Addr, SocketAddrV4};
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::fmt;
+use std::net::{Ipv4Addr, SocketAddrV4};
+use std::process::Command;
+use std::sync::Arc;
 
 use ipnet::Ipv4Net;
-use uuid::Uuid;
 use separator::Separatable;
+use uuid::Uuid;
 
 use e2d2::allocators::CacheAligned;
-use e2d2::interface::{PortQueue, FlowDirector, PortType, PmdPort};
+use e2d2::interface::{FlowDirector, PmdPort, PortQueue, PortType};
 use e2d2::scheduler::NetBricksContext;
 use e2d2::utils;
 
-use tcp_common::{TcpRole, TcpState, ReleaseCause};
-
+use tcp_common::{ReleaseCause, TcpRole, TcpState};
 
 #[derive(Clone)]
 pub struct ConRecord {
@@ -57,8 +57,10 @@ impl ConRecord {
         }
         self.server_index = 0;
         self.sock = if sock.is_some() { Some(*sock.unwrap()) } else { None };
-        self.role=role;
-        if self.role == TcpRole::Client { self.uuid= Some(Uuid::new_v4()); } // server connections get the uuid from associated client connection if any
+        self.role = role;
+        if self.role == TcpRole::Client {
+            self.uuid = Some(Uuid::new_v4());
+        } // server connections get the uuid from associated client connection if any
     }
 
     #[inline]
@@ -102,17 +104,29 @@ impl ConRecord {
 
     #[inline]
     pub fn get_stamp(&self, i: usize) -> Option<u64> {
-        if i < self.state_count && i > 0 { Some(self.stamps[i]) } else { None }
+        if i < self.state_count && i > 0 {
+            Some(self.stamps[i])
+        } else {
+            None
+        }
     }
 
     #[inline]
     pub fn get_last_stamp(&self) -> Option<u64> {
-        if self.state_count > 1 { Some(self.stamps[self.state_count-1]) } else { None }
+        if self.state_count > 1 {
+            Some(self.stamps[self.state_count - 1])
+        } else {
+            None
+        }
     }
 
     #[inline]
     pub fn get_first_stamp(&self) -> Option<u64> {
-        if self.state_count > 1 { Some(self.stamps[1]) } else { None }
+        if self.state_count > 1 {
+            Some(self.stamps[1])
+        } else {
+            None
+        }
     }
 
     #[inline]
@@ -123,10 +137,10 @@ impl ConRecord {
     pub fn deltas_since_synsent_or_synrecv(&self) -> Vec<u64> {
         //let synsent = self.stamps[1];
         if self.state_count >= 3 {
-            let vals= self.stamps[1..self.state_count].iter();
+            let vals = self.stamps[1..self.state_count].iter();
             let next_vals = self.stamps[1..self.state_count].iter().skip(1);
             //self.stamps[2..self.state_count].iter().map(|stamp| stamp - synsent).collect()
-            vals.zip(next_vals).map(|(cur,next)| next-cur ).collect()
+            vals.zip(next_vals).map(|(cur, next)| next - cur).collect()
         } else {
             vec![]
         }
@@ -139,7 +153,11 @@ impl fmt::Display for ConRecord {
             f,
             "({:?}, sock={:21}, port={}, {:?}, {:?}, {}, {:?})",
             self.role,
-            if self.sock.is_some() { self.sock.unwrap().to_string() } else { "none".to_string() },
+            if self.sock.is_some() {
+                self.sock.unwrap().to_string()
+            } else {
+                "none".to_string()
+            },
             self.port,
             self.states(),
             self.release_cause,
@@ -158,9 +176,8 @@ pub fn is_kni_core(pci: &CacheAligned<PortQueue>) -> bool {
 }
 
 pub fn setup_kni(kni_name: &str, ip_net: &Ipv4Net, mac_address: &String, kni_netns: &String, ip_address_count: usize) {
-    let ip_addr_first= ip_net.addr();
-    let prefix_len= ip_net.prefix_len();
-
+    let ip_addr_first = ip_net.addr();
+    let prefix_len = ip_net.prefix_len();
 
     debug!("setup_kni");
     //# ip link set dev vEth1 address XX:XX:XX:XX:XX:XX
@@ -208,7 +225,9 @@ pub fn setup_kni(kni_name: &str, ip_net: &Ipv4Net, mac_address: &String, kni_net
     );
     for i in 0..ip_address_count {
         // e.g. ip netns exec nskni ip addr add w.x.y.z/24 dev vEth1
-        let ip_net = Ipv4Net::new(Ipv4Addr::from(u32::from(ip_addr_first) + i as u32), prefix_len).unwrap().to_string();
+        let ip_net = Ipv4Net::new(Ipv4Addr::from(u32::from(ip_addr_first) + i as u32), prefix_len)
+            .unwrap()
+            .to_string();
         let output = Command::new("ip")
             .args(&["netns", "exec", kni_netns, "ip", "addr", "add", &ip_net, "dev", kni_name])
             .output()
@@ -244,7 +263,6 @@ pub fn setup_kni(kni_name: &str, ip_net: &Ipv4Net, mac_address: &String, kni_net
     info!("show IP addr: {}\n {}", output.status, String::from_utf8_lossy(&reply2));
 }
 
-
 #[derive(Deserialize, Clone, Copy, PartialEq)]
 pub enum FlowSteeringMode {
     Port,
@@ -252,60 +270,56 @@ pub enum FlowSteeringMode {
     Ip,
 }
 
-
 #[inline]
-fn get_tcp_port_base(port: &PmdPort , count: u16) -> u16 {
+fn get_tcp_port_base(port: &PmdPort, count: u16) -> u16 {
     let port_mask = port.get_tcp_dst_port_mask();
     port_mask - count * (!port_mask + 1)
 }
 
-
-pub fn initialize_flowdirector(context:&NetBricksContext, steering_mode: FlowSteeringMode, ipnet: &Ipv4Net) -> HashMap<i32, Arc<FlowDirector>> {
-    let mut fdir_map: HashMap<i32, Arc<FlowDirector>>= HashMap::new();
-    for port in  context.ports.values() {
+pub fn initialize_flowdirector(
+    context: &NetBricksContext,
+    steering_mode: FlowSteeringMode,
+    ipnet: &Ipv4Net,
+) -> HashMap<i32, Arc<FlowDirector>> {
+    let mut fdir_map: HashMap<i32, Arc<FlowDirector>> = HashMap::new();
+    for port in context.ports.values() {
         if *port.port_type() == PortType::Dpdk {
             // initialize flow director on port, cannot do this in parallel from multiple threads
-            let mut flowdir= FlowDirector::new(port.clone());
+            let mut flowdir = FlowDirector::new(port.clone());
             let ip_addr_first = ipnet.addr();
             for (i, core) in context.active_cores.iter().enumerate() {
-                match context.rx_queues.get(&core) {    // retrieve all rx queues for this core
-                    Some(set) => match set.iter().last() {  // select one (should be the only one)
-                        Some(queue) => {
-                            match steering_mode {
-                                FlowSteeringMode::Ip => {
-                                    let dst_ip= u32::from(ip_addr_first) + i as u32 +1;
-                                    let dst_port = port.get_tcp_dst_port_mask();
-                                    debug!("set fdir filter on port {} for rfs mode IP: queue= {}, ip= {}, port base = {}",
-                                           port.port_id(),
-                                           queue.rxq(),
-                                           Ipv4Addr::from(dst_ip),
-                                           dst_port,
-                                    );
-                                    flowdir.add_fdir_filter(
-                                        queue.rxq(),
-                                        dst_ip,
-                                        dst_port,
-                                    ).unwrap();
-                                }
-                                FlowSteeringMode::Port => {
-                                    let dst_ip= u32::from(ip_addr_first);
-                                    let dst_port= get_tcp_port_base(port, i as u16);
-                                    debug!("set fdir filter on port {} for rfs mode Port: queue= {}, ip= {}, port base = {}",
-                                           port.port_id(),
-                                           queue.rxq(),
-                                           Ipv4Addr::from(dst_ip),
-                                           dst_port,
-                                    );
-                                    flowdir.add_fdir_filter(
-                                        queue.rxq(),
-                                        dst_ip,
-                                        dst_port,
-                                    ).unwrap();
-                                }
+                match context.rx_queues.get(&core) {
+                    // retrieve all rx queues for this core
+                    Some(set) => match set.iter().last() {
+                        // select one (should be the only one)
+                        Some(queue) => match steering_mode {
+                            FlowSteeringMode::Ip => {
+                                let dst_ip = u32::from(ip_addr_first) + i as u32 + 1;
+                                let dst_port = port.get_tcp_dst_port_mask();
+                                debug!(
+                                    "set fdir filter on port {} for rfs mode IP: queue= {}, ip= {}, port base = {}",
+                                    port.port_id(),
+                                    queue.rxq(),
+                                    Ipv4Addr::from(dst_ip),
+                                    dst_port,
+                                );
+                                flowdir.add_fdir_filter(queue.rxq(), dst_ip, dst_port).unwrap();
                             }
-                        }
+                            FlowSteeringMode::Port => {
+                                let dst_ip = u32::from(ip_addr_first);
+                                let dst_port = get_tcp_port_base(port, i as u16);
+                                debug!(
+                                    "set fdir filter on port {} for rfs mode Port: queue= {}, ip= {}, port base = {}",
+                                    port.port_id(),
+                                    queue.rxq(),
+                                    Ipv4Addr::from(dst_ip),
+                                    dst_port,
+                                );
+                                flowdir.add_fdir_filter(queue.rxq(), dst_ip, dst_port).unwrap();
+                            }
+                        },
                         None => (),
-                    }
+                    },
                     None => (),
                 }
             }
@@ -314,8 +328,6 @@ pub fn initialize_flowdirector(context:&NetBricksContext, steering_mode: FlowSte
     }
     fdir_map
 }
-
-
 
 #[cfg(test)]
 mod tests {

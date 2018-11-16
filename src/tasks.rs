@@ -1,15 +1,15 @@
-use std::sync::Arc;
-use e2d2::interface::PmdPort;
-use e2d2::native::zcsi::rte_kni_handle_request;
 use e2d2::common::EmptyMetadata;
 use e2d2::headers::{IpHeader, MacHeader, TcpHeader};
-use e2d2::interface::{Packet, new_packet};
-use e2d2::queues::{MpscProducer};
+use e2d2::interface::PmdPort;
+use e2d2::interface::{new_packet, Packet};
+use e2d2::native::zcsi::rte_kni_handle_request;
 use e2d2::native::zcsi::{mbuf_alloc_bulk, MBuf};
+use e2d2::queues::MpscProducer;
 use e2d2::scheduler::{Executable, Runnable, Scheduler, StandaloneScheduler};
+use std::sync::Arc;
 
-use tcp_common::L234Data;
 use e2d2::utils;
+use tcp_common::L234Data;
 use uuid::Uuid;
 //use separator::Separatable;
 
@@ -22,16 +22,11 @@ pub enum TaskType {
     NoTaskTypes = 4, // for iteration over TaskType
 }
 
-pub fn install_task<T: Executable + 'static>(
-    sched: &mut StandaloneScheduler,
-    task_name: &str,
-    task: T,
-) -> Uuid {
+pub fn install_task<T: Executable + 'static>(sched: &mut StandaloneScheduler, task_name: &str, task: T) -> Uuid {
     let uuid = Uuid::new_v4();
     sched.add_runnable(Runnable::from_task(uuid, task_name.to_string(), task).move_unready());
     uuid
 }
-
 
 pub struct KniHandleRequest {
     pub kni_port: Arc<PmdPort>,
@@ -41,7 +36,8 @@ pub struct KniHandleRequest {
 impl Executable for KniHandleRequest {
     fn execute(&mut self) -> (u32, i32) {
         let now = utils::rdtsc_unsafe();
-        if now - self.last_tick >= 22700 * 1000 {  // roughly each 10 ms
+        if now - self.last_tick >= 22700 * 1000 {
+            // roughly each 10 ms
             unsafe {
                 rte_kni_handle_request(self.kni_port.get_kni());
             };
@@ -56,11 +52,11 @@ impl Executable for KniHandleRequest {
 pub struct PacketInjector {
     packet_prototype: Packet<TcpHeader, EmptyMetadata>,
     producer: MpscProducer,
-    //    tx: Sender<MessageFrom>,
     no_packets: usize,
     sent_packets: usize,
-    //    used_cycles: Vec<u64>,
-    //    pipeline_id: PipelineId,
+    // in cycles
+    min_inter_batch_gap: u64,
+    lastbatch_timestamp: u64,
 }
 
 pub const PRIVATE_ETYPE_PACKET: u16 = 0x08FF;
@@ -74,8 +70,8 @@ impl PacketInjector {
         producer: MpscProducer,
         hd_src_data: &L234Data,
         no_packets: usize,
-        //        pipeline_id: PipelineId,
-        //        tx: Sender<MessageFrom>,
+        min_inter_batch_gap: u64,
+        dst_port: u16,
     ) -> PacketInjector {
         let mut mac = MacHeader::new();
         mac.src = hd_src_data.mac.clone();
@@ -91,6 +87,7 @@ impl PacketInjector {
         let mut tcp = TcpHeader::new();
         tcp.set_syn_flag();
         tcp.set_src_port(hd_src_data.port);
+        tcp.set_dst_port(dst_port);
         tcp.set_data_offset(5);
         let packet_prototype = new_packet()
             .unwrap()
@@ -106,18 +103,11 @@ impl PacketInjector {
             producer,
             no_packets,
             sent_packets: 0,
-            //            used_cycles: vec![0; 4],
-            //            pipeline_id,
-            //            tx,
+            min_inter_batch_gap,
+            lastbatch_timestamp: 0,
         }
     }
-    /*
-    #[inline]
-    pub fn create_packet(&mut self) -> Packet<TcpHeader, EmptyMetadata> {
-        let p = unsafe { self.packet_prototype.copy() };
-        p
-    }
-*/
+
     #[inline]
     pub fn create_packet_from_mbuf(&mut self, mbuf: *mut MBuf) -> Packet<TcpHeader, EmptyMetadata> {
         let p = unsafe { self.packet_prototype.copy_use_mbuf(mbuf) };
@@ -129,7 +119,10 @@ impl Executable for PacketInjector {
     fn execute(&mut self) -> (u32, i32) {
         let mut inserted = 0;
         // only enqeue new packets if queue has free slots for a full batch (currently we would otherwise create a memory leak)
-        if (self.no_packets == 0 || self.sent_packets < self.no_packets) && self.producer.free_slots() >= INJECTOR_BATCH_SIZE {
+        if (self.no_packets == 0 || self.sent_packets < self.no_packets)
+            && self.producer.free_slots() >= INJECTOR_BATCH_SIZE
+            && (utils::rdtsc_unsafe() - self.lastbatch_timestamp) >= self.min_inter_batch_gap
+        {
             let mut mbuf_ptr_array = Vec::<*mut MBuf>::with_capacity(INJECTOR_BATCH_SIZE);
             let ret = unsafe { mbuf_alloc_bulk(mbuf_ptr_array.as_mut_ptr(), INJECTOR_BATCH_SIZE as u32) };
             assert_eq!(ret, 0);
@@ -140,6 +133,7 @@ impl Executable for PacketInjector {
             inserted = self.producer.enqueue_mbufs(&mbuf_ptr_array);
             self.sent_packets += inserted;
             assert_eq!(inserted, INJECTOR_BATCH_SIZE);
+            self.lastbatch_timestamp = utils::rdtsc_unsafe();
         }
         (inserted as u32, self.producer.used_slots() as i32)
     }
@@ -149,7 +143,8 @@ pub struct TickGenerator {
     packet_prototype: Packet<TcpHeader, EmptyMetadata>,
     producer: MpscProducer,
     last_tick: u64,
-    tick_length: u64, // in cycles
+    tick_length: u64,
+    // in cycles
     tick_count: u64,
 }
 
@@ -158,7 +153,7 @@ impl TickGenerator {
     pub fn new(
         producer: MpscProducer,
         hd_src_data: &L234Data,
-        tick_length_1000: u64, // in cycles/1000
+        tick_length: u64, // in cycles
     ) -> TickGenerator {
         let mut mac = MacHeader::new();
         mac.src = hd_src_data.mac.clone();
@@ -189,7 +184,7 @@ impl TickGenerator {
             producer,
             last_tick: 0,
             tick_count: 0,
-            tick_length: tick_length_1000 * 1000,
+            tick_length,
         }
     }
 

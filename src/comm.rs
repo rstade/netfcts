@@ -1,9 +1,8 @@
-use std::sync::mpsc::Sender;
 use std::fmt;
-use std::collections::HashMap;
-use uuid::Uuid;
-use tcp_common::TcpCounter;
+use std::sync::mpsc::Sender;
 use tasks::TaskType;
+use tcp_common::TcpCounter;
+use uuid::Uuid;
 use ConRecord;
 
 #[derive(Clone, PartialEq, Eq, Hash, Default)]
@@ -28,7 +27,7 @@ pub enum MessageFrom {
     PrintPerformance(Vec<i32>), // performance of tasks on cores selected by indices
     Counter(PipelineId, TcpCounter, TcpCounter),
     CRecords(PipelineId, Vec<ConRecord>, Vec<ConRecord>), // pipeline_id, client, server
-    FetchCounter, // triggers fetching of counters from pipelines
+    FetchCounter,                                         // triggers fetching of counters from pipelines
     FetchCRecords,
     Exit, // exit recv thread
 }
