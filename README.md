@@ -1,6 +1,6 @@
 _**netfcts overview**_
 
-Extensions to crate [Netbricks](https://github.com/NetSys/NetBricks).
+Extensions to crate [Netbricks](https://github.com/rstade/NetBricks). This is a crate containing a common library of helper functions and data structures for crate [TrafficEngine](https://github.com/rstade/TrafficEngine) and crate [ProxyEngine](https://github.com/silverengine-de/ProxyEngine).
 
 _**Installation**_
 
