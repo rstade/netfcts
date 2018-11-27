@@ -4,6 +4,8 @@ use std::fmt;
 use std::fmt::Write;
 use std::net::SocketAddrV4;
 use std::ops::{Index, IndexMut};
+use e2d2::interface::Packet;
+use e2d2::headers::TcpHeader;
 
 use eui48::MacAddress;
 use uuid::Uuid;
@@ -163,4 +165,12 @@ impl CData {
             uuid,
         }
     }
+}
+
+
+#[inline]
+pub fn tcp_payload_size<M: Sized + Send>(p: &Packet<TcpHeader, M>) -> usize {
+    let iph = p.get_pre_header().unwrap();
+    // payload size = ip total length - ip header length -tcp header length
+    iph.length() as usize - (iph.ihl() as usize) * 4 - (p.get_header().data_offset() as usize) * 4
 }
