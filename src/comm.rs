@@ -20,7 +20,6 @@ impl fmt::Display for PipelineId {
 
 pub enum MessageFrom {
     Channel(PipelineId, Sender<MessageTo>),
-    Established(PipelineId, ConRecord),
     GenTimeStamp(PipelineId, &'static str, usize, u64, u64),
     StartEngine(Sender<MessageTo>),
     Task(PipelineId, Uuid, TaskType),
