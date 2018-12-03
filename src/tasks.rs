@@ -57,6 +57,8 @@ pub struct PacketInjector {
     // in cycles
     min_inter_batch_gap: u64,
     lastbatch_timestamp: u64,
+    start_delay: u64,
+    start_time: u64,
 }
 
 pub const PRIVATE_ETYPE_PACKET: u16 = 0x08FF;
@@ -105,7 +107,14 @@ impl PacketInjector {
             sent_packets: 0,
             min_inter_batch_gap,
             lastbatch_timestamp: 0,
+            start_delay:0,
+            start_time: 0,
         }
+    }
+
+    pub fn set_start_delay(mut self, delay: u64) -> PacketInjector {
+        self.start_delay = delay;
+        self
     }
 
     #[inline]
@@ -117,11 +126,14 @@ impl PacketInjector {
 
 impl Executable for PacketInjector {
     fn execute(&mut self) -> (u32, i32) {
+        let now = utils::rdtsc_unsafe();
+        if self.start_time == 0 { self.start_time = now; }
         let mut inserted = 0;
         // only enqeue new packets if queue has free slots for a full batch (currently we would otherwise create a memory leak)
         if (self.no_packets == 0 || self.sent_packets < self.no_packets)
             && self.producer.free_slots() >= INJECTOR_BATCH_SIZE
-            && (utils::rdtsc_unsafe() - self.lastbatch_timestamp) >= self.min_inter_batch_gap
+            && (now - self.lastbatch_timestamp) >= self.min_inter_batch_gap
+            && (now - self.start_time) >= self.start_delay
         {
             let mut mbuf_ptr_array = Vec::<*mut MBuf>::with_capacity(INJECTOR_BATCH_SIZE);
             let ret = unsafe { mbuf_alloc_bulk(mbuf_ptr_array.as_mut_ptr(), INJECTOR_BATCH_SIZE as u32) };
