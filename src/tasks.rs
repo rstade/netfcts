@@ -66,6 +66,10 @@ pub const PRIVATE_ETYPE_TIMER: u16 = 0x08FE;
 
 pub const INJECTOR_BATCH_SIZE: usize = 32;
 
+pub fn  private_etype(etype: &u16) -> bool {
+    return *etype == PRIVATE_ETYPE_PACKET || *etype == PRIVATE_ETYPE_TIMER
+}
+
 impl PacketInjector {
     // by setting no_packets=0 batch creation is unlimited
     pub fn new(
