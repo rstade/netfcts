@@ -335,6 +335,39 @@ pub fn initialize_flowdirector(
     fdir_map
 }
 
+pub struct TimeAdder {
+    sum: u64,
+    count: u64,
+    name: String,
+    sample_size: u64,
+}
+
+impl TimeAdder {
+    pub fn new(name: &str, sample_size: u64) -> TimeAdder {
+        TimeAdder {
+            sum: 0,
+            count: 0,
+            name: name.to_string(),
+            sample_size,
+        }
+    }
+
+    pub fn add(&mut self, time_diff: u64) {
+        self.sum += time_diff;
+        self.count += 1;
+
+        if self.count % self.sample_size == 0 {
+            info!(
+                "TimeAdder {}: sum = {}, count= {}, per count= {}",
+                self.name,
+                self.sum,
+                self.count,
+                self.sum / self.count
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
