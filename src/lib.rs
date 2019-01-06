@@ -40,7 +40,7 @@ use tcp_common::{ReleaseCause, TcpRole, TcpState};
 pub struct ConRecord {
     pub role: TcpRole,
     pub port: u16,
-    pub sock: Option<SocketAddrV4>,
+    pub sock: Option<(u32,u16)>,
     pub uuid: Option<Uuid>,
     state_count: usize,
     state: [TcpState; 8],
@@ -52,7 +52,7 @@ pub struct ConRecord {
 
 impl ConRecord {
     #[inline]
-    pub fn init(&mut self, role: TcpRole, port: u16, sock: Option<&SocketAddrV4>) {
+    pub fn init(&mut self, role: TcpRole, port: u16, sock: Option<&(u32,u16)>) {
         self.port = port;
         self.state_count = 1;
         if role == TcpRole::Client {
@@ -159,7 +159,7 @@ impl fmt::Display for ConRecord {
             "({:?}, {:21}, {:6}, {:3}, {:?}, {:?}, {}, {:?})",
             self.role,
             if self.sock.is_some() {
-                self.sock.unwrap().to_string()
+                SocketAddrV4::new(Ipv4Addr::from(self.sock.unwrap().0), self.sock.unwrap().1).to_string()
             } else {
                 "none".to_string()
             },

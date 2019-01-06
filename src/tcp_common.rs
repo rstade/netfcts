@@ -102,12 +102,14 @@ impl TcpCounter {
 impl Index<TcpStatistics> for TcpCounter {
     type Output = usize;
 
+    #[inline]
     fn index(&self, tcp_control: TcpStatistics) -> &usize {
         &self.counter[tcp_control as usize]
     }
 }
 
 impl IndexMut<TcpStatistics> for TcpCounter {
+    #[inline]
     fn index_mut(&mut self, tcp_control: TcpStatistics) -> &mut usize {
         &mut self.counter[tcp_control as usize]
     }
