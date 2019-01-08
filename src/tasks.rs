@@ -62,21 +62,19 @@ pub struct PacketInjector {
     start_time: u64,
 }
 
-
 pub const PRIVATE_ETYPE_PACKET: u16 = 0x08FF;
 pub const PRIVATE_ETYPE_TIMER: u16 = 0x08FE;
 pub const ETYPE_IPV4: u16 = 0x0800;
 pub const ETYPE_IPV6: u16 = 0x86dd;
-pub const ETYPE_ARP: u16  = 0x0806;
+pub const ETYPE_ARP: u16 = 0x0806;
 pub const ETYPE_VLAN: u16 = 0x8100;
 pub const ETYPE_DOUBLE_VLAN: u16 = 0x9100;
-
 
 pub const INJECTOR_BATCH_SIZE: usize = 32;
 
 #[inline]
-pub fn  private_etype(etype: &u16) -> bool {
-    return *etype == PRIVATE_ETYPE_PACKET || *etype == PRIVATE_ETYPE_TIMER
+pub fn private_etype(etype: &u16) -> bool {
+    return *etype == PRIVATE_ETYPE_PACKET || *etype == PRIVATE_ETYPE_TIMER;
 }
 
 impl PacketInjector {
@@ -120,7 +118,7 @@ impl PacketInjector {
             sent_packets: 0,
             min_inter_batch_gap,
             lastbatch_timestamp: 0,
-            start_delay:0,
+            start_delay: 0,
             start_time: 0,
         }
     }
@@ -140,7 +138,9 @@ impl PacketInjector {
 impl Executable for PacketInjector {
     fn execute(&mut self) -> (u32, i32) {
         let now = utils::rdtsc_unsafe();
-        if self.start_time == 0 { self.start_time = now; }
+        if self.start_time == 0 {
+            self.start_time = now;
+        }
         let mut inserted = 0;
         // only enqeue new packets if queue has free slots for a full batch (currently we would otherwise create a memory leak)
         if (self.no_packets == 0 || self.sent_packets < self.no_packets)

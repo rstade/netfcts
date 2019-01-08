@@ -73,12 +73,26 @@ pub fn print_rx_tx_counters(pipeline_id: &PipelineId, rx_tx_stats: &Vec<(u64, us
     if rx_tx_stats.len() > 0 {
         println!("{}: rx/tx packets over time", pipeline_id);
         println!("      {:>24} -{:>8} {:>8}", "cycles", "rx", "tx");
-        println!("      {:>24} -{:8} {:8}", rx_tx_stats[0].0.separated_string(), rx_tx_stats[0].1, rx_tx_stats[0].2);
+        println!(
+            "      {:>24} -{:8} {:8}",
+            rx_tx_stats[0].0.separated_string(),
+            rx_tx_stats[0].1,
+            rx_tx_stats[0].2
+        );
     }
     if rx_tx_stats.len() > 1 {
-        rx_tx_stats.iter().zip(&rx_tx_stats[1..]).enumerate().for_each(|(i,(&prev, &next))| {
-            println!("{:4}: {:>24} -{:8} {:8}", i, (next.0 - prev.0).separated_string(), (next.1 - prev.1), (next.2 - prev.2))
-        });
+        rx_tx_stats
+            .iter()
+            .zip(&rx_tx_stats[1..])
+            .enumerate()
+            .for_each(|(i, (&prev, &next))| {
+                println!(
+                    "{:4}: {:>24} -{:8} {:8}",
+                    i,
+                    (next.0 - prev.0).separated_string(),
+                    (next.1 - prev.1),
+                    (next.2 - prev.2)
+                )
+            });
     }
 }
-

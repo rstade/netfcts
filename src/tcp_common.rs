@@ -169,7 +169,6 @@ impl CData {
     }
 }
 
-
 #[inline]
 pub fn tcp_payload_size<M: Sized + Send>(p: &Packet<TcpHeader, M>) -> usize {
     let iph = p.get_pre_header().unwrap();
