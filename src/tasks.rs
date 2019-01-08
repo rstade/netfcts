@@ -19,7 +19,8 @@ pub enum TaskType {
     Pipe2Kni = 1,
     Pipe2Pci = 2,
     TickGenerator = 3,
-    NoTaskTypes = 4, // for iteration over TaskType
+    BypassPipe = 4,
+    NoTaskTypes = 5, // for iteration over TaskType
 }
 
 pub fn install_task<T: Executable + 'static>(sched: &mut StandaloneScheduler, task_name: &str, task: T) -> Uuid {

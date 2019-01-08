@@ -24,7 +24,7 @@ pub enum MessageFrom {
     Task(PipelineId, Uuid, TaskType),
     PrintPerformance(Vec<i32>), // performance of tasks on cores selected by indices
     // counter client/to side, counter server/from side, sent_packets with time_stamps
-    Counter(PipelineId, TcpCounter, TcpCounter, Vec<(u64, usize, usize)>),
+    Counter(PipelineId, TcpCounter, TcpCounter, Option<Vec<(u64, usize, usize)>>),
     CRecords(PipelineId, Vec<ConRecord>, Vec<ConRecord>), // pipeline_id, client, server
     FetchCounter,                                         // triggers fetching of counters from pipelines
     FetchCRecords,
@@ -34,7 +34,7 @@ pub enum MessageFrom {
 pub enum MessageTo {
     FetchCounter, // fetch counters from pipeline
     FetchCRecords,
-    Counter(PipelineId, TcpCounter, TcpCounter, Vec<(u64, usize, usize)>),
+    Counter(PipelineId, TcpCounter, TcpCounter, Option<Vec<(u64, usize, usize)>>),
     CRecords(PipelineId, Vec<ConRecord>, Vec<ConRecord>),
     StartGenerator,
     Exit, // exit recv thread
