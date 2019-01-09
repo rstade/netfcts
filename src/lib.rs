@@ -271,8 +271,8 @@ pub fn setup_kni(kni_name: &str, ip_net: &Ipv4Net, mac_address: &String, kni_net
 
 #[derive(Deserialize, Clone, Copy, PartialEq)]
 pub enum FlowSteeringMode {
+    // Port is default
     Port,
-    // default
     Ip,
 }
 
