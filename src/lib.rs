@@ -10,6 +10,7 @@ extern crate separator;
 #[macro_use]
 extern crate error_chain;
 extern crate toml;
+extern crate rand;
 
 pub mod comm;
 pub mod tasks;
@@ -18,12 +19,14 @@ pub mod timer_wheel;
 pub mod system;
 pub mod io;
 pub mod errors;
+pub mod utils;
 
 use std::collections::HashMap;
-use std::fmt;
+
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::process::Command;
 use std::sync::Arc;
+use std::fmt;
 
 use ipnet::Ipv4Net;
 use separator::Separatable;
@@ -32,7 +35,7 @@ use uuid::Uuid;
 use e2d2::allocators::CacheAligned;
 use e2d2::interface::{FlowDirector, PmdPort, PortQueue, PortType};
 use e2d2::scheduler::NetBricksContext;
-use e2d2::utils;
+use e2d2::utils as e2d2_utils;
 
 use tcp_common::{ReleaseCause, TcpRole, TcpState};
 
@@ -98,7 +101,7 @@ impl ConRecord {
     #[inline]
     pub fn push_state(&mut self, state: TcpState) {
         self.state[self.state_count] = state;
-        self.stamps[self.state_count] = utils::rdtsc_unsafe();
+        self.stamps[self.state_count] = e2d2_utils::rdtsc_unsafe();
         self.state_count += 1;
     }
 
@@ -335,38 +338,6 @@ pub fn initialize_flowdirector(
     fdir_map
 }
 
-pub struct TimeAdder {
-    sum: u64,
-    count: u64,
-    name: String,
-    sample_size: u64,
-}
-
-impl TimeAdder {
-    pub fn new(name: &str, sample_size: u64) -> TimeAdder {
-        TimeAdder {
-            sum: 0,
-            count: 0,
-            name: name.to_string(),
-            sample_size,
-        }
-    }
-
-    pub fn add(&mut self, time_diff: u64) {
-        self.sum += time_diff;
-        self.count += 1;
-
-        if self.count % self.sample_size == 0 {
-            info!(
-                "TimeAdder {}: sum = {}, count= {}, per count= {}",
-                self.name,
-                self.sum,
-                self.count,
-                self.sum / self.count
-            );
-        }
-    }
-}
 
 #[cfg(test)]
 mod tests {
