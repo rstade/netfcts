@@ -106,25 +106,30 @@ where
 }
 
 #[cfg(test)]
-
+// run this test with --release flag, it is real-time sensitive
 mod tests {
     use super::*;
     use std::thread;
     use std::time::Duration;
+    use super::super::system::SystemData;
 
     #[test]
     fn event_timing() {
+        let system_data = SystemData::detect();
+        let milli_to_cycles: u64 = system_data.cpu_clock/1000;
+
         let start = utils::rdtsc_unsafe();
         println!("start = {:?}", start);
-        const MILLIS_TO_CYCLES: u64 = 2270000u64;
-        let mut wheel: TimerWheel<u16> = TimerWheel::new(128, 16 * MILLIS_TO_CYCLES, 128);
+
+        let mut wheel: TimerWheel<u16> = TimerWheel::new(128, 16 * milli_to_cycles, 128);
 
         for j in 0..128 {
             let n_millis: u16 = j * 16 + 8;
-            let _slot = wheel.schedule(&((n_millis as u64) * MILLIS_TO_CYCLES), n_millis);
-            println!("n_millis= {}, slot = {}", n_millis, _slot);
+            let _slot = wheel.schedule(&((n_millis as u64) * milli_to_cycles), n_millis);
+            //println!("n_millis= {}, slot = {}", n_millis, _slot);
         }
 
+        let mut n_found = 0;
         for _i in 0..1024 {
             // proceed with roughly 2 ms ticks
             thread::sleep(Duration::from_millis(2));
@@ -133,7 +138,8 @@ mod tests {
                 (Some(mut drain), _more) => {
                     let event = drain.next();
                     if event.is_some() {
-                        assert_eq!(&(now - start) / 16 / MILLIS_TO_CYCLES, (event.unwrap() / 16) as u64);
+                        assert_eq!(&(now - start) / 16 / milli_to_cycles, (event.unwrap() / 16) as u64);
+                        n_found += 1;
                     } else {
                         assert!(false);
                     }; // there must be one event in each slot
@@ -141,8 +147,10 @@ mod tests {
                 (None, _more) => (),
             }
         }
+        assert_eq!(n_found, 128);
+
         // test that wheel overflow does not break the code:
-        wheel.schedule(&((5000 as u64) * MILLIS_TO_CYCLES), 5000);
+        wheel.schedule(&((5000 as u64) * milli_to_cycles), 5000);
 
         let mut found_it: bool = false;
         for _i in 0..1024 {
