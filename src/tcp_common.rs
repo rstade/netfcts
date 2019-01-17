@@ -8,7 +8,6 @@ use e2d2::interface::Packet;
 use e2d2::headers::TcpHeader;
 
 use eui48::MacAddress;
-use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
 pub enum TcpState {
@@ -36,15 +35,15 @@ pub enum TcpStatistics {
     SentSynAck = 1,
     SentSynAck2 = 2,
     SentFin = 3,
-    SentFinAck = 4,
-    SentFinAck2 = 5,
+    SentFinPssv = 4,
+    SentAck4Fin= 5,
     SentAck = 6,
     RecvSyn = 7,
     RecvSynAck = 8,
     RecvSynAck2 = 9,
-    RecvFin = 10,
-    RecvFinAck = 11,
-    RecvFinAck2 = 12,
+    RecvFin = 10,           //FIN of active close
+    RecvFinPssv = 11,    //FIN of passive close
+    RecvAck4Fin = 12,       //ACK for a FIN packet
     RecvAck = 13,
     RecvRst = 14,
     Unexpected = 15,
@@ -59,15 +58,15 @@ impl convert::From<usize> for TcpStatistics {
             1 => TcpStatistics::SentSynAck,
             2 => TcpStatistics::SentSynAck2,
             3 => TcpStatistics::SentFin,
-            4 => TcpStatistics::SentFinAck,
-            5 => TcpStatistics::SentFinAck2,
+            4 => TcpStatistics::SentFinPssv,
+            5 => TcpStatistics::SentAck4Fin,
             6 => TcpStatistics::SentAck,
             7 => TcpStatistics::RecvSyn,
             8 => TcpStatistics::RecvSynAck,
             9 => TcpStatistics::RecvSynAck2,
             10 => TcpStatistics::RecvFin,
-            11 => TcpStatistics::RecvFinAck,
-            12 => TcpStatistics::RecvFinAck2,
+            11 => TcpStatistics::RecvFinPssv,
+            12 => TcpStatistics::RecvAck4Fin,
             13 => TcpStatistics::RecvAck,
             14 => TcpStatistics::RecvRst,
             15 => TcpStatistics::Unexpected,
@@ -156,11 +155,11 @@ pub struct CData {
     // connection data sent as first payload packet
     pub reply_socket: SocketAddrV4, // the socket on which the trafficengine expects the reply from the DUT
     pub client_port: u16,
-    pub uuid: Option<Uuid>,
+    pub uuid: u64,
 }
 
 impl CData {
-    pub fn new(reply_socket: SocketAddrV4, client_port: u16, uuid: Option<Uuid>) -> CData {
+    pub fn new(reply_socket: SocketAddrV4, client_port: u16, uuid: u64) -> CData {
         CData {
             reply_socket,
             client_port,

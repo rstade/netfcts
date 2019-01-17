@@ -6,6 +6,7 @@ pub struct TimeAdder {
     count: u64,
     name: String,
     sample_size: u64,
+    start_time: u64,
 }
 
 impl TimeAdder {
@@ -15,10 +16,28 @@ impl TimeAdder {
             count: 0,
             name: name.to_string(),
             sample_size,
+            start_time: 0,
         }
     }
 
-    pub fn add(&mut self, time_diff: u64) {
+// takes absolute time-stamp and calculates difference to start_time
+    pub fn add_stamp(&mut self, time_stamp: u64) {
+        assert!(self.start_time > 0);
+        self.sum += time_stamp - self.start_time;
+        self.count += 1;
+
+        if self.count % self.sample_size == 0 {
+            println!(
+                "TimeAdder {:24}: sum = {:12}, count= {:9}, per count= {:6}",
+                self.name,
+                self.sum,
+                self.count,
+                self.sum / self.count
+            );
+        }
+    }
+
+    pub fn add_diff(&mut self, time_diff: u64) {
         self.sum += time_diff;
         self.count += 1;
 
@@ -31,6 +50,10 @@ impl TimeAdder {
                 self.sum / self.count
             );
         }
+    }
+
+    pub fn start(&mut self, start_time: u64) {
+        self.start_time= start_time;
     }
 }
 

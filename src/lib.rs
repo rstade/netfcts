@@ -27,10 +27,11 @@ use std::net::{Ipv4Addr, SocketAddrV4};
 use std::process::Command;
 use std::sync::Arc;
 use std::fmt;
+use std::slice::Iter;
+use std::cmp::Ordering;
 
 use ipnet::Ipv4Net;
 use separator::Separatable;
-use uuid::Uuid;
 
 use e2d2::allocators::CacheAligned;
 use e2d2::interface::{FlowDirector, PmdPort, PortQueue, PortType};
@@ -39,15 +40,17 @@ use e2d2::utils as e2d2_utils;
 
 use tcp_common::{ReleaseCause, TcpRole, TcpState};
 
-#[derive(Clone)]
+
+#[derive(Clone, Debug)]
 pub struct ConRecord {
+    stamps: [u32; 6],
+    state: [TcpState; 8],
+    base_stamp: u64,
     pub role: TcpRole,
     pub port: u16,
     pub sock: Option<(u32, u16)>,
-    pub uuid: Option<Uuid>,
+    uid: u64,
     state_count: usize,
-    state: [TcpState; 8],
-    stamps: [u64; 8],
     pub payload_packets: usize,
     pub server_index: usize,
     release_cause: ReleaseCause,
@@ -55,20 +58,22 @@ pub struct ConRecord {
 
 impl ConRecord {
     #[inline]
-    pub fn init(&mut self, role: TcpRole, port: u16, sock: Option<&(u32, u16)>) {
+    pub fn init(&mut self, role: TcpRole, port: u16, sock: Option<(u32, u16)>) {
         self.port = port;
         self.state_count = 1;
+        self.base_stamp = 0;
+        self.payload_packets = 0;
         if role == TcpRole::Client {
             self.state[0] = TcpState::Closed;
+            self.uid = e2d2_utils::rdtsc_unsafe();
         } else {
             self.state[0] = TcpState::Listen;
+            // server connections get the uuid from associated client connection if any
+            self.uid = 0;
         }
         self.server_index = 0;
-        self.sock = if sock.is_some() { Some(*sock.unwrap()) } else { None };
+        self.sock = sock;
         self.role = role;
-        if self.role == TcpRole::Client {
-            self.uuid = Some(Uuid::new_v4());
-        } // server connections get the uuid from associated client connection if any
     }
 
     #[inline]
@@ -89,19 +94,24 @@ impl ConRecord {
             release_cause: ReleaseCause::Unknown,
             // we are using an Array, not Vec for the state history, the latter eats too much performance
             state_count: 0,
+            base_stamp: 0,
             state: [TcpState::Closed; 8],
-            stamps: [0; 8],
+            stamps: [0u32; 6],
             port: 0u16,
             sock: None,
             payload_packets: 0,
-            uuid: None,
+            uid: 0,
         }
     }
 
     #[inline]
     pub fn push_state(&mut self, state: TcpState) {
         self.state[self.state_count] = state;
-        self.stamps[self.state_count] = e2d2_utils::rdtsc_unsafe();
+        if self.state_count == 1 {
+            self.base_stamp = e2d2_utils::rdtsc_unsafe();
+        } else {
+            self.stamps[self.state_count - 2] = ((e2d2_utils::rdtsc_unsafe() - self.base_stamp) / 1000000) as u32;
+        }
         self.state_count += 1;
     }
 
@@ -111,27 +121,19 @@ impl ConRecord {
     }
 
     #[inline]
-    pub fn get_stamp(&self, i: usize) -> Option<u64> {
-        if i < self.state_count && i > 0 {
-            Some(self.stamps[i])
-        } else {
-            None
-        }
-    }
-
-    #[inline]
     pub fn get_last_stamp(&self) -> Option<u64> {
-        if self.state_count > 1 {
-            Some(self.stamps[self.state_count - 1])
-        } else {
-            None
+        match self.state_count {
+            0 => None,
+            1 => None,
+            2 => Some(self.base_stamp),
+            _ => Some(self.base_stamp + self.stamps[self.state_count - 3] as u64 * 1000000)
         }
     }
 
     #[inline]
     pub fn get_first_stamp(&self) -> Option<u64> {
         if self.state_count > 1 {
-            Some(self.stamps[1])
+            Some(self.base_stamp)
         } else {
             None
         }
@@ -142,13 +144,16 @@ impl ConRecord {
         &self.state[0..self.state_count]
     }
 
-    pub fn deltas_since_synsent_or_synrecv(&self) -> Vec<u64> {
+    #[inline]
+    pub fn uid(&self) -> u64 { self.uid }
+
+    #[inline]
+    pub fn set_uid(&mut self, new_uid: u64) { self.uid = new_uid }
+
+    pub fn deltas_since_synsent_or_synrecv(&self) -> Vec<u32> {
         //let synsent = self.stamps[1];
         if self.state_count >= 3 {
-            let vals = self.stamps[1..self.state_count].iter();
-            let next_vals = self.stamps[1..self.state_count].iter().skip(1);
-            //self.stamps[2..self.state_count].iter().map(|stamp| stamp - synsent).collect()
-            vals.zip(next_vals).map(|(cur, next)| next - cur).collect()
+            self.stamps[0..(self.state_count - 3)].iter().map(|s| *s).collect()
         } else {
             vec![]
         }
@@ -170,7 +175,7 @@ impl fmt::Display for ConRecord {
             self.server_index,
             self.states(),
             self.release_cause,
-            self.stamps[1].separated_string(),
+            self.base_stamp.separated_string(),
             self.deltas_since_synsent_or_synrecv()
                 .iter()
                 .map(|u| u.separated_string())
@@ -178,6 +183,70 @@ impl fmt::Display for ConRecord {
         )
     }
 }
+
+#[derive(Debug)]
+pub struct RecordStore {
+    store: Vec<ConRecord>,
+    used_slots: usize,
+}
+
+impl RecordStore {
+    pub fn with_capacity(capacity: usize) -> RecordStore {
+        RecordStore {
+            store: vec![ConRecord::new(); capacity],
+            used_slots: 0,
+        }
+    }
+
+    #[inline]
+    pub fn get_unused_slot(&mut self) -> usize {
+        assert!(self.used_slots < self.store.len());
+        self.used_slots += 1;
+        self.used_slots - 1
+    }
+
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.used_slots
+    }
+
+    #[inline]
+    pub fn iter(&self) -> Iter<ConRecord> {
+        self.store[0..self.used_slots].iter()
+    }
+
+    #[inline]
+    pub fn get_mut(&mut self, slot: usize) -> Option<&mut ConRecord> {
+        if slot < self.used_slots {
+            Some(&mut self.store[slot])
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    pub fn get(&self, slot: usize) -> Option<&ConRecord> {
+        if slot < self.used_slots {
+            Some(&self.store[slot])
+        } else {
+            None
+        }
+    }
+
+    pub fn sort_by<F>(&mut self, compare: F)
+        where F: FnMut(&ConRecord, &ConRecord) -> Ordering {
+        self.store[0..self.used_slots].sort_by(compare)
+    }
+}
+/*
+impl Iterator for RecordStore {
+    type Item = ConRecord;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.store.iter().next()
+    }
+}
+*/
 
 #[inline]
 pub fn is_kni_core(pci: &CacheAligned<PortQueue>) -> bool {
