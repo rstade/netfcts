@@ -87,8 +87,9 @@ where
         (None, false)
     }
 
+    /// schedules a new element and returen the slot and the index in the wheel
     #[inline]
-    pub fn schedule(&mut self, after_cycles: &u64, what: T) -> u64
+    pub fn schedule(&mut self, after_cycles: &u64, what: T) -> (u16, u16)
     where
         T: Debug,
     {
@@ -101,7 +102,20 @@ where
         let slot = slots.wrapping_rem(self.no_slots as u64);
         //debug!("scheduling port {:?} at {:?} in slot {}", what, when.separated_string(), slot);
         self.slots[slot as usize].push(what);
-        slot
+        (slot as u16, (self.slots[slot as usize].len()-1) as u16)
+    }
+
+    // we use replace to remove elements from the wheel by overwriting them with an invalid value
+    #[inline]
+    pub fn replace(&mut self, slot_and_index: (u16, u16), new_element: T) -> Option<T> {
+        let slot= slot_and_index.0 as usize;
+        let index = slot_and_index.1 as usize;
+        if index < self.slots[slot].len() {
+            let old=self.slots[slot][index].clone();
+            self.slots[slot][index]=new_element;
+            Some(old)
+        }
+        else { None }
     }
 }
 
@@ -169,5 +183,25 @@ mod tests {
             }
         }
         assert!(found_it);
+    }
+
+    #[test]
+    fn replace_element_in_timer_wheel() {
+        let system_data = SystemData::detect();
+        let milli_to_cycles: u64 = system_data.cpu_clock/1000;
+
+
+        let mut wheel: TimerWheel<u16> = TimerWheel::new(128, 16 * milli_to_cycles, 128);
+        // populate
+        for j in 0..128 {
+            let n_millis: u16 = j * 16 + 8;
+            let _slot = wheel.schedule(&((n_millis as u64) * milli_to_cycles), n_millis);
+            //println!("n_millis= {}, slot = {}", n_millis, _slot);
+        }
+        // add the test element
+        let n_millis=100;
+        let slot_and_index = wheel.schedule(&((n_millis as u64) * milli_to_cycles), n_millis);
+        let old = wheel.replace(slot_and_index, 101);
+        assert_eq!(old.unwrap(), n_millis);
     }
 }

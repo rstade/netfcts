@@ -11,7 +11,7 @@ use eui48::MacAddress;
 
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
 pub enum TcpState {
-    Listen,
+    Listen = 0,
     SynReceived,
     SynSent,
     Established,
@@ -22,6 +22,25 @@ pub enum TcpState {
     FinWait2,
     Closed,
 }
+
+impl convert::From<u16> for TcpState {
+    fn from(i: u16) -> TcpState {
+        match i {
+            0 => TcpState::Listen,
+            1 => TcpState::SynReceived,
+            2 => TcpState::SynSent,
+            3 => TcpState::Established,
+            4 => TcpState::CloseWait,
+            5 => TcpState::LastAck,
+            6 => TcpState::FinWait1,
+            7 => TcpState::Closing,
+            8 => TcpState::FinWait2,
+            9 => TcpState::Closed,
+            _ => TcpState::Listen,
+        }
+    }
+}
+
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum TcpRole {
