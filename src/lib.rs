@@ -162,7 +162,7 @@ impl ConRecord {
     pub fn deltas_since_synsent_or_synrecv(&self) -> Vec<u32> {
         //let synsent = self.stamps[1];
         if self.state_count >= 3 {
-            self.stamps[0..(self.state_count - 3)].iter().map(|s| *s).collect()
+            self.stamps[0..(self.state_count - 2)].iter().map(|s| *s).collect()
         } else {
             vec![]
         }
@@ -259,7 +259,7 @@ impl Iterator for RecordStore {
 
 pub trait ConRecordOperations {
 
-    /// return reference to reference counted pointer to store in connection
+    /// return reference to reference counted pointer to store for the connection
     #[inline]
     fn store(&self) -> &Rc<RefCell<RecordStore>>;
 

@@ -6,54 +6,72 @@ pub struct TimeAdder {
     count: u64,
     name: String,
     sample_size: u64,
+    warm_up: u64,
     start_time: u64,
 }
 
 impl TimeAdder {
+    pub fn new_with_warm_up(name: &str, sample_size: u64, warm_up: u64) -> TimeAdder {
+        TimeAdder {
+            sum: 0,
+            count: 0,
+            name: name.to_string(),
+            sample_size,
+            warm_up,
+            start_time: 0,
+        }
+    }
+
     pub fn new(name: &str, sample_size: u64) -> TimeAdder {
         TimeAdder {
             sum: 0,
             count: 0,
             name: name.to_string(),
             sample_size,
+            warm_up: 0,
             start_time: 0,
         }
     }
 
-// takes absolute time-stamp and calculates difference to start_time
+    fn do_count(&mut self) {
+        self.count += 1;
+        if self.count == self.warm_up {
+            // warm-up completed
+            println!(
+                "TimeAdder {:24}: sum = {:12}, count= {:9}, per count= {:6} (warm-up)",
+                self.name,
+                self.sum,
+                self.count,
+                self.sum / self.count
+            );
+            self.sum=0;
+        }
+
+        if self.count > self.warm_up && (self.count-self.warm_up) % self.sample_size == 0 {
+            println!(
+                "TimeAdder {:24}: sum = {:12}, count= {:9}, per count= {:6}",
+                self.name,
+                self.sum,
+                self.count,
+                self.sum / (self.count - self.warm_up)
+            );
+        }
+    }
+
+    // takes absolute time-stamp and calculates difference to start_time
     pub fn add_stamp(&mut self, time_stamp: u64) {
         assert!(self.start_time > 0);
         self.sum += time_stamp - self.start_time;
-        self.count += 1;
-
-        if self.count % self.sample_size == 0 {
-            println!(
-                "TimeAdder {:24}: sum = {:12}, count= {:9}, per count= {:6}",
-                self.name,
-                self.sum,
-                self.count,
-                self.sum / self.count
-            );
-        }
+        self.do_count();
     }
-
+    // expects time differences
     pub fn add_diff(&mut self, time_diff: u64) {
         self.sum += time_diff;
-        self.count += 1;
-
-        if self.count % self.sample_size == 0 {
-            println!(
-                "TimeAdder {:24}: sum = {:12}, count= {:9}, per count= {:6}",
-                self.name,
-                self.sum,
-                self.count,
-                self.sum / self.count
-            );
-        }
+        self.do_count();
     }
 
     pub fn start(&mut self, start_time: u64) {
-        self.start_time= start_time;
+        self.start_time = start_time;
     }
 }
 
@@ -102,25 +120,23 @@ impl<T: Copy + PartialEq> Chunk<T> {
             self.chunk[ix] = self.empty;
             self.used_slots -= 1;
             Some(old)
-        }
-        else { None }
+        } else { None }
     }
     #[inline]
-    fn insert(&mut self, ix:usize, item: T) -> Option<T> {
+    fn insert(&mut self, ix: usize, item: T) -> Option<T> {
         let old = self.chunk[ix];
         self.chunk[ix] = item;
         if old != self.empty {
             Some(old)
-        }
-        else {
-            self.used_slots+=1;
+        } else {
+            self.used_slots += 1;
             None
         }
     }
 }
 
 struct ChunkHeap<T>
-    where T: Copy+PartialEq {
+    where T: Copy + PartialEq {
     heap: Vec<Chunk<T>>,
     free_chunks: VecDeque<usize>,
 }
@@ -162,7 +178,7 @@ impl PortMap {
         PortMap { root: [0; ROOT_SIZE] }
     }
     #[inline]
-    fn insert<T: Copy+PartialEq>(&mut self, chunk_heap: &mut ChunkHeap<T>, port: u16, item: T) {
+    fn insert<T: Copy + PartialEq>(&mut self, chunk_heap: &mut ChunkHeap<T>, port: u16, item: T) {
         let high_p = port.shr(CHUNK_BITS as u16) as usize;
         let low_p = port.bitand(CHUNK_SIZE as u16 - 1) as usize;
         if self.root[high_p] == 0 {
@@ -172,7 +188,7 @@ impl PortMap {
         chunk_heap.get_mut(self.root[high_p] as usize).insert(low_p, item);
     }
     #[inline]
-    fn get<'a, T: Copy+PartialEq>(&self, chunk_heap: &'a ChunkHeap<T>, port: u16) -> Option<&'a T> {
+    fn get<'a, T: Copy + PartialEq>(&self, chunk_heap: &'a ChunkHeap<T>, port: u16) -> Option<&'a T> {
         let high_p = port.shr(CHUNK_BITS as u16) as usize;
         if self.root[high_p] == 0 { return None; } else {
             let low_p = port.bitand(CHUNK_SIZE as u16 - 1) as usize;
@@ -180,7 +196,7 @@ impl PortMap {
         }
     }
     #[inline]
-    fn remove<T: Copy+PartialEq>(&mut self, chunk_heap: &mut ChunkHeap<T>, port: u16) -> Option<T> {
+    fn remove<T: Copy + PartialEq>(&mut self, chunk_heap: &mut ChunkHeap<T>, port: u16) -> Option<T> {
         let high_p = port.shr(CHUNK_BITS as u16) as usize;
         if self.root[high_p] == 0 { return None; } else {
             let low_p = port.bitand(CHUNK_SIZE as u16 - 1) as usize;
