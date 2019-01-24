@@ -31,16 +31,21 @@ use std::slice::Iter;
 use std::cmp::Ordering;
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::mem;
 
 use ipnet::Ipv4Net;
 use separator::Separatable;
+use eui48::MacAddress;
 
 use e2d2::allocators::CacheAligned;
-use e2d2::interface::{FlowDirector, PmdPort, PortQueue, PortType};
+use e2d2::interface::{FlowDirector, PmdPort, PortQueue, PortType, Packet};
+use e2d2::interface::update_tcp_checksum;
 use e2d2::scheduler::NetBricksContext;
 use e2d2::utils as e2d2_utils;
+use e2d2::native::zcsi::ipv4_phdr_chksum;
+use e2d2::headers::{EndOffset, IpHeader, MacHeader, TcpHeader};
 
-use tcp_common::{ReleaseCause, TcpRole, TcpState};
+use tcp_common::{ReleaseCause, TcpRole, TcpState, L234Data};
 
 
 #[derive(Clone, Debug)]
@@ -515,6 +520,123 @@ pub fn initialize_flowdirector(
     fdir_map
 }
 
+
+pub struct HeaderState<'a> {
+    pub mac: &'a mut MacHeader,
+    pub ip: &'a mut IpHeader,
+    pub tcp: &'a mut TcpHeader,
+}
+
+impl<'a> HeaderState<'a> {
+    #[inline]
+    pub fn set_dst_socket(&mut self, ip: u32, port: u16) {
+        self.ip.set_dst(ip);
+        self.tcp.set_dst_port(port);
+    }
+
+    #[inline]
+    pub fn tcp_payload_len(&self) -> usize {
+        self.ip.length() as usize - self.tcp.offset() - self.ip.ihl() as usize * 4
+    }
+}
+
+#[inline]
+pub fn do_ttl(h: &mut HeaderState) {
+    let ttl = h.ip.ttl();
+    if ttl >= 1 {
+        h.ip.set_ttl(ttl - 1);
+    }
+    h.ip.update_checksum();
+}
+
+#[inline]
+pub fn prepare_checksum_and_ttl<M: Sized + Send>(p: &mut Packet<TcpHeader, M>, h: &mut HeaderState) {
+    let ttl = h.ip.ttl();
+    if ttl >= 1 {
+        h.ip.set_ttl(ttl - 1);
+    }
+
+    if p.tcp_checksum_tx_offload() {
+        h.ip.set_csum(0);
+        unsafe {
+            let csum = ipv4_phdr_chksum(h.ip, 0);
+            h.tcp.set_checksum(csum);
+        }
+        p.set_l2_len(mem::size_of::<MacHeader>() as u64);
+        p.set_l3_len(mem::size_of::<IpHeader>() as u64);
+        p.set_l4_len(mem::size_of::<TcpHeader>() as u64);
+        debug!("l234len = {}, {}, {}, ol_flags= 0x{:X}, validate= {}", p.l2_len(), p.l3_len(), p.l4_len(), p.ol_flags(), p.validate_tx_offload() );
+    } else {
+        h.ip.update_checksum();
+        update_tcp_checksum(p, h.ip.payload_size(0), h.ip.src(), h.ip.dst());
+        // debug!("checksum recalc = {:X}",p.get_header().checksum());
+    }
+}
+
+#[inline]
+pub fn set_header(server: &L234Data, port: u16, h: &mut HeaderState, me_mac: &MacAddress, me_ip: u32) {
+    h.mac.set_dmac(&server.mac);
+    h.mac.set_smac(me_mac);
+    h.set_dst_socket(server.ip, server.port);
+    h.ip.set_src(me_ip);
+    h.tcp.set_src_port(port);
+}
+
+
+// remove tcp options for SYN and SYN-ACK,
+// pre-requisite: no payload exists, because any payload is not shifted up
+#[inline]
+pub fn remove_tcp_options<M: Sized + Send>(p: &mut Packet<TcpHeader, M>, h: &mut HeaderState) {
+    let old_offset = h.tcp.offset() as u16;
+    if old_offset > 20 {
+        debug!("trimming tcp-options by { } bytes", old_offset - 20);
+        h.tcp.set_data_offset(5u8);
+        // minimum mbuf data length is 60 bytes
+        h.ip.trim_length_by(old_offset - 20u16);
+        //                        let trim_by = min(p.data_len() - 60usize, (old_offset - 20u16) as usize);
+        //                        82599 does padding itself !?
+        let trim_by = old_offset - 20;
+        p.trim_payload_size(trim_by as usize);
+    }
+}
+/*
+#[inline]
+pub fn make_reply_packet(h: &mut HeaderState) {
+    let smac = h.mac.src;
+    let dmac = h.mac.dst;
+    let sip = h.ip.src();
+    let dip = h.ip.dst();
+    let sport = h.tcp.src_port();
+    let dport = h.tcp.dst_port();
+    h.mac.set_smac(&dmac);
+    h.mac.set_dmac(&smac);
+    h.ip.set_dst(sip);
+    h.ip.set_src(dip);
+    h.tcp.set_src_port(dport);
+    h.tcp.set_dst_port(sport);
+    h.tcp.set_ack_flag();
+    let ack_num = h.tcp.seq_num().wrapping_add(1);
+    h.tcp.set_ack_num(ack_num);
+}
+*/
+#[inline]
+pub fn make_reply_packet(h: &mut HeaderState, inc: u32) {
+    let smac = h.mac.src;
+    let dmac = h.mac.dst;
+    let sip = h.ip.src();
+    let dip = h.ip.dst();
+    let sport = h.tcp.src_port();
+    let dport = h.tcp.dst_port();
+    h.mac.set_smac(&dmac);
+    h.mac.set_dmac(&smac);
+    h.ip.set_dst(sip);
+    h.ip.set_src(dip);
+    h.tcp.set_src_port(dport);
+    h.tcp.set_dst_port(sport);
+    h.tcp.set_ack_flag();
+    let ack_num = h.tcp.seq_num().wrapping_add(h.tcp_payload_len() as u32 + inc);
+    h.tcp.set_ack_num(ack_num);
+}
 
 #[cfg(test)]
 mod tests {
