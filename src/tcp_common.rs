@@ -23,8 +23,8 @@ pub enum TcpState {
     Closed,
 }
 
-impl convert::From<u16> for TcpState {
-    fn from(i: u16) -> TcpState {
+impl convert::From<u8> for TcpState {
+    fn from(i: u8) -> TcpState {
         match i {
             0 => TcpState::Listen,
             1 => TcpState::SynReceived,
@@ -44,8 +44,20 @@ impl convert::From<u16> for TcpState {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum TcpRole {
-    Client,
+    Client=0,
     Server,
+    Proxy,
+}
+
+impl convert::From<u8> for TcpRole {
+    fn from(i: u8) -> TcpRole {
+        match i {
+            0 => TcpRole::Client,
+            1 => TcpRole::Server,
+            2 => TcpRole::Proxy,
+            _ => TcpRole::Client,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -95,6 +107,36 @@ impl convert::From<usize> for TcpStatistics {
         }
     }
 }
+
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ReleaseCause {
+    Unknown = 0,
+    Timeout = 1,
+    PassiveClose = 2,
+    ActiveClose = 3,
+    PassiveRst = 4,
+    ActiveRst = 5,
+    MaxCauses = 6,
+}
+
+
+impl convert::From<u8> for ReleaseCause {
+    fn from(i: u8) -> ReleaseCause {
+        match i {
+            0 => ReleaseCause::Unknown,
+            1 => ReleaseCause::Timeout,
+            2 => ReleaseCause::PassiveClose,
+            3 => ReleaseCause::ActiveClose,
+            4 => ReleaseCause::PassiveRst,
+            5 => ReleaseCause::ActiveRst,
+            6 => ReleaseCause::MaxCauses,
+            _ => ReleaseCause::Unknown,
+        }
+    }
+}
+
+
 
 impl fmt::Display for TcpStatistics {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
@@ -156,17 +198,6 @@ pub trait UserData: Send + Sync + 'static {
     fn ref_userdata(&self) -> &Any;
     fn mut_userdata(&mut self) -> &mut Any;
     fn init(&mut self);
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum ReleaseCause {
-    Unknown = 0,
-    Timeout = 1,
-    PassiveClose = 2,
-    ActiveClose = 3,
-    PassiveRst = 4,
-    ActiveRst = 5,
-    MaxCauses = 6,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]

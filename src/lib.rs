@@ -32,6 +32,7 @@ use std::cmp::Ordering;
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::mem;
+use std::fmt::Display;
 
 use ipnet::Ipv4Net;
 use separator::Separatable;
@@ -47,24 +48,56 @@ use e2d2::headers::{EndOffset, IpHeader, MacHeader, TcpHeader};
 
 use tcp_common::{ReleaseCause, TcpRole, TcpState, L234Data};
 
-
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
+#[repr(align(64))]
 pub struct ConRecord {
-    stamps: [u32; 6],
-    state: [u16; 8],
     base_stamp: u64,
-    pub role: TcpRole,
-    pub port: u16,
-    pub sock: Option<(u32, u16)>,
     uid: u64,
-    state_count: usize,
-    pub payload_packets: usize,
-    pub server_index: usize,
-    release_cause: ReleaseCause,
+    stamps: [u32; 6],
+    state: [u8; 8],
+    payload_packets: u32,
+    client_ip: u32,
+    client_port: u16,
+    port: u16,
+    state_count: u8,
+    server_index: u8,
+    release_cause: u8,
+    role: u8,
 }
 
 // we map cycle differences from u64 to u32 to minimize record size in the cache (performance)
-const TIME_STAMP_REDUCTION_FACTOR:u64 = 1000;
+pub const TIME_STAMP_REDUCTION_FACTOR: u64 = 1000;
+
+
+pub trait HasTcpState {
+    fn push_state(&mut self, state: TcpState);
+    fn last_state(&self) -> TcpState;
+    fn states(&self) -> Vec<TcpState>;
+    fn get_last_stamp(&self) -> Option<u64>;
+    fn get_first_stamp(&self) -> Option<u64>;
+    fn deltas_since_synsent_or_synrecv(&self) -> Vec<u32>;
+    fn release_cause(&self) -> ReleaseCause;
+    fn set_release_cause(&mut self, cause: ReleaseCause);
+}
+
+pub trait HasConData {
+    fn sock(&self) -> (u32, u16);
+    fn set_sock(&mut self, s: (u32, u16));
+    fn port(&self) -> u16;
+    fn set_port(&mut self, port: u16);
+    fn uid(&self) -> u64;
+    fn set_uid(&mut self, new_uid: u64);
+    fn server_index(&self) -> u8;
+    fn set_server_index(&mut self, index: u8);
+    fn payload_packets(&self) -> u32;
+    fn increment_payload_packets(&mut self) -> u32;
+}
+
+
+pub trait Storable: Sized + Display + Clone {
+    fn new() -> Self;
+}
+
 
 impl ConRecord {
     #[inline]
@@ -73,75 +106,96 @@ impl ConRecord {
         self.state_count = 1;
         self.base_stamp = 0;
         self.payload_packets = 0;
-        if role == TcpRole::Client {
-            self.state[0] = TcpState::Closed as u16;
-            self.uid = e2d2_utils::rdtsc_unsafe();
+        if role == TcpRole::Server {
+            self.state[0] = TcpState::Listen as u8;
         } else {
-            self.state[0] = TcpState::Listen as u16;
-            // server connections get the uuid from associated client connection if any
-            self.uid = 0;
+            self.state[0] = TcpState::Closed as u8;
         }
+        self.uid = e2d2_utils::rdtsc_unsafe();
         self.server_index = 0;
-        self.sock = sock;
-        self.role = role;
+        let s = sock.unwrap_or((0, 0));
+        self.client_ip = s.0;
+        self.client_port = s.1;
+        self.role = role as u8;
     }
 
     #[inline]
-    pub fn released(&mut self, cause: ReleaseCause) {
-        self.release_cause = cause;
+    pub fn role(&self) -> TcpRole {
+        TcpRole::from(self.role)
+    }
+
+
+}
+
+impl HasConData for ConRecord {
+    #[inline]
+    fn sock(&self) -> (u32, u16) { (self.client_ip, self.client_port) }
+
+    #[inline]
+    fn set_sock(&mut self, s: (u32, u16)) {
+        self.client_ip = s.0;
+        self.client_port = s.1;
     }
 
     #[inline]
-    pub fn get_release_cause(&self) -> ReleaseCause {
-        self.release_cause
-    }
+    fn port(&self) -> u16 { self.port }
 
     #[inline]
-    pub fn new() -> ConRecord {
-        ConRecord {
-            role: TcpRole::Client,
-            server_index: 0,
-            release_cause: ReleaseCause::Unknown,
-            // we are using an Array, not Vec for the state history, the latter eats too much performance
-            state_count: 0,
-            base_stamp: 0,
-            state: [TcpState::Closed as u16; 8],
-            stamps: [0u32; 6],
-            port: 0u16,
-            sock: None,
-            payload_packets: 0,
-            uid: 0,
-        }
-    }
+    fn set_port(&mut self, port: u16) { self.port = port }
 
     #[inline]
-    pub fn push_state(&mut self, state: TcpState) {
-        self.state[self.state_count] = state as u16;
+    fn uid(&self) -> u64 { self.uid }
+
+    #[inline]
+    fn set_uid(&mut self, new_uid: u64) { self.uid = new_uid }
+
+    #[inline]
+    fn server_index(&self) -> u8 { self.server_index }
+
+    #[inline]
+    fn set_server_index(&mut self, index: u8) { self.server_index = index }
+
+    #[inline]
+    fn payload_packets(&self) -> u32 { self.payload_packets }
+
+    #[inline]
+    fn increment_payload_packets(&mut self) -> u32 {
+        self.payload_packets += 1;
+        self.payload_packets
+    }
+
+
+}
+
+impl HasTcpState for ConRecord {
+    #[inline]
+    fn push_state(&mut self, state: TcpState) {
+        self.state[self.state_count as usize] = state as u8;
         if self.state_count == 1 {
             self.base_stamp = e2d2_utils::rdtsc_unsafe();
         } else {
-            self.stamps[self.state_count - 2] = ((e2d2_utils::rdtsc_unsafe() - self.base_stamp) / TIME_STAMP_REDUCTION_FACTOR) as u32;
+            self.stamps[self.state_count as usize - 2] = ((e2d2_utils::rdtsc_unsafe() - self.base_stamp) / TIME_STAMP_REDUCTION_FACTOR) as u32;
         }
         self.state_count += 1;
     }
 
     #[inline]
-    pub fn last_state(&self) -> TcpState {
-        TcpState::from(self.state[self.state_count - 1])
+    fn last_state(&self) -> TcpState {
+        TcpState::from(self.state[self.state_count as usize - 1])
     }
 
     #[inline]
-    pub fn get_last_stamp(&self) -> Option<u64> {
+    fn get_last_stamp(&self) -> Option<u64> {
         match self.state_count {
             0 => None,
             1 => None,
             2 => Some(self.base_stamp),
-            _ => Some(self.base_stamp + self.stamps[self.state_count - 3] as u64 * TIME_STAMP_REDUCTION_FACTOR)
+            _ => Some(self.base_stamp + self.stamps[self.state_count as usize - 3] as u64 * TIME_STAMP_REDUCTION_FACTOR)
         }
     }
 
     #[inline]
-    pub fn get_first_stamp(&self) -> Option<u64> {
+    fn get_first_stamp(&self) -> Option<u64> {
         if self.state_count > 1 {
             Some(self.base_stamp)
         } else {
@@ -149,28 +203,32 @@ impl ConRecord {
         }
     }
 
+    fn deltas_since_synsent_or_synrecv(&self) -> Vec<u32> {
+        //let synsent = self.stamps[1];
+        if self.state_count >= 3 {
+            self.stamps[0..(self.state_count as usize - 2)].iter().map(|s| *s).collect()
+        } else {
+            vec![]
+        }
+    }
+
     #[inline]
-    pub fn states(&self) -> Vec<TcpState> {
-        let mut result= vec![TcpState::Listen; self.state_count];
-        for i in 0..self.state_count {
-            result[i]=TcpState::from(self.state[i]);
+    fn states(&self) -> Vec<TcpState> {
+        let mut result = vec![TcpState::Listen; self.state_count as usize];
+        for i in 0..self.state_count as usize {
+            result[i] = TcpState::from(self.state[i]);
         }
         result
     }
 
     #[inline]
-    pub fn uid(&self) -> u64 { self.uid }
+    fn set_release_cause(&mut self, cause: ReleaseCause) {
+        self.release_cause = cause as u8;
+    }
 
     #[inline]
-    pub fn set_uid(&mut self, new_uid: u64) { self.uid = new_uid }
-
-    pub fn deltas_since_synsent_or_synrecv(&self) -> Vec<u32> {
-        //let synsent = self.stamps[1];
-        if self.state_count >= 3 {
-            self.stamps[0..(self.state_count - 2)].iter().map(|s| *s).collect()
-        } else {
-            vec![]
-        }
+    fn release_cause(&self) -> ReleaseCause {
+        ReleaseCause::from(self.release_cause)
     }
 }
 
@@ -180,15 +238,15 @@ impl fmt::Display for ConRecord {
             f,
             "({:?}, {:21}, {:6}, {:3}, {:?}, {:?}, {}, {:?})",
             self.role,
-            if self.sock.is_some() {
-                SocketAddrV4::new(Ipv4Addr::from(self.sock.unwrap().0), self.sock.unwrap().1).to_string()
+            if self.client_ip != 0 {
+                SocketAddrV4::new(Ipv4Addr::from(self.client_ip), self.client_port).to_string()
             } else {
                 "none".to_string()
             },
             self.port,
             self.server_index,
             self.states(),
-            self.release_cause,
+            self.release_cause(),
             self.base_stamp.separated_string(),
             self.deltas_since_synsent_or_synrecv()
                 .iter()
@@ -198,16 +256,157 @@ impl fmt::Display for ConRecord {
     }
 }
 
-#[derive(Debug)]
-pub struct RecordStore {
-    store: Vec<ConRecord>,
+impl Storable for ConRecord {
+    #[inline]
+    fn new() -> ConRecord {
+        ConRecord {
+            role: TcpRole::Client as u8,
+            server_index: 0,
+            release_cause: ReleaseCause::Unknown as u8,
+            // we are using an Array, not Vec for the state history, the latter eats too much performance
+            state_count: 0,
+            base_stamp: 0,
+            state: [TcpState::Closed as u8; 8],
+            stamps: [0u32; 6],
+            port: 0u16,
+            client_ip: 0,
+            client_port: 0,
+            payload_packets: 0,
+            uid: 0,
+        }
+    }
+}
+
+
+#[derive(Clone, Copy, Debug)]
+#[repr(align(64))]
+pub struct ExtendedConRecord<T> {
+    c_conrec: ConRecord,
+    extension: T,
+}
+
+impl<T> ExtendedConRecord<T> {
+    pub fn extension(&self) -> &T {
+        &self.extension
+    }
+
+    pub fn extension_mut(&mut self) -> &mut T {
+        &mut self.extension
+    }
+
+    pub fn con_record(&self) -> &ConRecord {
+        &self.c_conrec
+    }
+
+    pub fn con_record_mut(&mut self) -> &mut ConRecord {
+        &mut self.c_conrec
+    }
+}
+
+impl<T> Storable for ExtendedConRecord<T>
+where T: Storable {
+    #[inline]
+    fn new() -> ExtendedConRecord<T> {
+        ExtendedConRecord {
+            c_conrec: ConRecord::new(),
+            extension: T::new(),
+        }
+    }
+}
+
+// need urgently the delegation feature of Rust, draft RFC 2393
+impl<T> HasTcpState for ExtendedConRecord<T> {
+
+    #[inline]
+    fn push_state(&mut self, state: TcpState) {
+        self.c_conrec.push_state(state)
+    }
+
+    #[inline]
+    fn last_state(&self) -> TcpState { self.c_conrec.last_state() }
+
+    #[inline]
+    fn states(&self) -> Vec<TcpState> { self.c_conrec.states() }
+
+    #[inline]
+    fn get_last_stamp(&self) -> Option<u64> { self.c_conrec.get_last_stamp() }
+
+    #[inline]
+    fn get_first_stamp(&self) -> Option<u64> { self.c_conrec.get_first_stamp() }
+
+    #[inline]
+    fn deltas_since_synsent_or_synrecv(&self) -> Vec<u32> { self.c_conrec.deltas_since_synsent_or_synrecv() }
+
+    #[inline]
+    fn release_cause(&self) -> ReleaseCause { self.c_conrec.release_cause() }
+
+    #[inline]
+    fn set_release_cause(&mut self, cause: ReleaseCause) { self.c_conrec.set_release_cause(cause) }
+}
+
+impl<T> HasConData for ExtendedConRecord<T> {
+    #[inline]
+    fn sock(&self) -> (u32, u16) { self.c_conrec.sock() }
+
+    #[inline]
+    fn set_sock(&mut self, s: (u32, u16)) { self.c_conrec.set_sock(s) }
+
+    #[inline]
+    fn port(&self) -> u16 { self.c_conrec.port() }
+
+    #[inline]
+    fn set_port(&mut self, port: u16) { self.c_conrec.set_port(port) }
+
+    #[inline]
+    fn uid(&self) -> u64 { self.c_conrec.uid() }
+
+    #[inline]
+    fn set_uid(&mut self, uid: u64) { self.c_conrec.set_uid(uid) }
+
+    #[inline]
+    fn server_index(&self) -> u8 { self.c_conrec.server_index() }
+
+    #[inline]
+    fn set_server_index(&mut self, index: u8) { self.c_conrec.set_server_index(index) }
+
+    #[inline]
+    fn payload_packets(&self) -> u32 { self.c_conrec.payload_packets() }
+
+    #[inline]
+    fn increment_payload_packets(&mut self) -> u32 { self.c_conrec.increment_payload_packets() }
+
+}
+
+impl<T> fmt::Display for ExtendedConRecord<T>
+where T: Display {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(
+            f,
+            "({}, {})",
+            self.c_conrec,
+            self.extension,
+        )
+    }
+}
+
+pub struct RecordStore<T: Storable> {
+    store: Vec<T>,
     used_slots: usize,
 }
 
-impl RecordStore {
-    pub fn with_capacity(capacity: usize) -> RecordStore {
+impl<T: Storable> fmt::Debug for RecordStore<T> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        for i in 0..self.used_slots - 1 {
+            write!(f, "{}", self.store[i])?;
+        }
+        Ok(())
+    }
+}
+
+impl<T: Storable> RecordStore<T> {
+    pub fn with_capacity(capacity: usize) -> RecordStore<T> {
         RecordStore {
-            store: vec![ConRecord::new(); capacity],
+            store: vec![T::new(); capacity],
             used_slots: 0,
         }
     }
@@ -225,12 +424,12 @@ impl RecordStore {
     }
 
     #[inline]
-    pub fn iter(&self) -> Iter<ConRecord> {
+    pub fn iter(&self) -> Iter<T> {
         self.store[0..self.used_slots].iter()
     }
 
     #[inline]
-    pub fn get_mut(&mut self, slot: usize) -> Option<&mut ConRecord> {
+    pub fn get_mut(&mut self, slot: usize) -> Option<&mut T> {
         if slot < self.used_slots {
             Some(&mut self.store[slot])
         } else {
@@ -239,7 +438,7 @@ impl RecordStore {
     }
 
     #[inline]
-    pub fn get(&self, slot: usize) -> Option<&ConRecord> {
+    pub fn get(&self, slot: usize) -> Option<&T> {
         if slot < self.used_slots {
             Some(&self.store[slot])
         } else {
@@ -248,7 +447,7 @@ impl RecordStore {
     }
 
     pub fn sort_by<F>(&mut self, compare: F)
-        where F: FnMut(&ConRecord, &ConRecord) -> Ordering {
+        where F: FnMut(&T, &T) -> Ordering {
         self.store[0..self.used_slots].sort_by(compare)
     }
 }
@@ -262,11 +461,10 @@ impl Iterator for RecordStore {
 }
 */
 
-pub trait ConRecordOperations {
-
+pub trait ConRecordOperations<T: Storable + HasConData + HasTcpState> {
     /// return reference to reference counted pointer to store for the connection
     #[inline]
-    fn store(&self) -> &Rc<RefCell<RecordStore>>;
+    fn store(&self) -> &Rc<RefCell<RecordStore<T>>>;
 
     /// return index of connection record in store
     #[inline]
@@ -274,89 +472,90 @@ pub trait ConRecordOperations {
 
     /// remove references to connection record and its store from connection
     #[inline]
-     fn release_conrec(&mut self);
+    fn release_conrec(&mut self);
 
     #[inline]
-     fn con_established(&mut self) {
+    fn con_established(&mut self) {
         self.store().borrow_mut().get_mut(self.con_rec()).unwrap().push_state(TcpState::Established);
     }
 
     #[inline]
-     fn server_syn_sent(&mut self) {
+    fn server_syn_sent(&mut self) {
         self.store().borrow_mut().get_mut(self.con_rec()).unwrap().push_state(TcpState::SynSent);
         //self.con_rec().s_syn_sent = utils::rdtsc_unsafe();
     }
 
     #[inline]
-     fn port(&self) -> u16 {
-        self.store().borrow().get(self.con_rec()).unwrap().port
+    fn port(&self) -> u16 {
+        self.store().borrow().get(self.con_rec()).unwrap().port()
     }
 
     #[inline]
-     fn in_use(&self) -> bool;
+    fn in_use(&self) -> bool;
 
     #[inline]
-     fn server_index(&self) -> usize {
-        self.store().borrow().get(self.con_rec()).unwrap().server_index
+    fn server_index(&self) -> usize {
+        self.store().borrow().get(self.con_rec()).unwrap().server_index() as usize
     }
 
     #[inline]
-     fn set_server_index(&mut self, index: usize) {
-        self.store().borrow_mut().get_mut(self.con_rec()).unwrap().server_index = index
+    fn set_server_index(&mut self, index: usize) {
+        self.store().borrow_mut().get_mut(self.con_rec()).unwrap().set_server_index(index as u8)
     }
 
     #[inline]
-     fn payload_packets(&self) -> usize {
-        self.store().borrow().get(self.con_rec()).unwrap().payload_packets
+    fn payload_packets(&self) -> usize {
+        self.store().borrow().get(self.con_rec()).unwrap().payload_packets() as usize
     }
 
     #[inline]
-     fn increment_payload_packets(&self) {
-        self.store().borrow_mut().get_mut(self.con_rec()).unwrap().payload_packets += 1
+    fn increment_payload_packets(&self) -> usize {
+        self.store().borrow_mut().get_mut(self.con_rec()).unwrap().increment_payload_packets() as usize
     }
 
     #[inline]
-     fn last_state(&self) -> TcpState {
+    fn last_state(&self) -> TcpState {
         self.store().borrow().get(self.con_rec()).unwrap().last_state()
     }
 
     #[inline]
-     fn states(&self) -> Vec<TcpState> {
+    fn states(&self) -> Vec<TcpState> {
         self.store().borrow().get(self.con_rec()).unwrap().states()
     }
 
     #[inline]
-     fn push_state(&self, state: TcpState) {
+    fn push_state(&self, state: TcpState) {
         self.store().borrow_mut().get_mut(self.con_rec()).unwrap().push_state(state)
     }
 
     #[inline]
-     fn released(&self, cause: ReleaseCause) {
-        self.store().borrow_mut().get_mut(self.con_rec()).unwrap().released(cause)
+    fn set_release_cause(&self, cause: ReleaseCause) {
+        self.store().borrow_mut().get_mut(self.con_rec()).unwrap().set_release_cause(cause)
     }
 
     #[inline]
-     fn set_port(&mut self, port: u16) {
-        self.store().borrow_mut().get_mut(self.con_rec()).unwrap().port = port;
+    fn set_port(&mut self, port: u16) {
+        self.store().borrow_mut().get_mut(self.con_rec()).unwrap().set_port(port);
     }
 
     #[inline]
-     fn get_dut_sock(&self) -> Option<(u32, u16)> {
-        self.store().borrow().get(self.con_rec()).unwrap().sock
+    fn sock(&self) -> Option<(u32, u16)> {
+        let s= self.store().borrow().get(self.con_rec()).unwrap().sock();
+        if s.0 != 0 { Some(s) } else { None }
     }
 
     #[inline]
-     fn set_dut_sock(&mut self, dut_sock: (u32, u16)) {
-        self.store().borrow_mut().get_mut(self.con_rec()).unwrap().sock = Some(dut_sock);
+    fn set_sock(&mut self, sock: (u32, u16)) {
+        self.store().borrow_mut().get_mut(self.con_rec()).unwrap().set_sock(sock);
     }
 
     #[inline]
-     fn set_uid(&mut self, uid: u64) {
+    fn set_uid(&mut self, uid: u64) {
         self.store().borrow_mut().get_mut(self.con_rec()).unwrap().set_uid(uid);
     }
 
     #[inline]
-     fn get_uid(&self) -> u64 {
+    fn get_uid(&self) -> u64 {
         self.store().borrow().get(self.con_rec()).unwrap().uid()
     }
 }
@@ -565,7 +764,7 @@ pub fn prepare_checksum_and_ttl<M: Sized + Send>(p: &mut Packet<TcpHeader, M>, h
         p.set_l2_len(mem::size_of::<MacHeader>() as u64);
         p.set_l3_len(mem::size_of::<IpHeader>() as u64);
         p.set_l4_len(mem::size_of::<TcpHeader>() as u64);
-        debug!("l234len = {}, {}, {}, ol_flags= 0x{:X}, validate= {}", p.l2_len(), p.l3_len(), p.l4_len(), p.ol_flags(), p.validate_tx_offload() );
+        debug!("l234len = {}, {}, {}, ol_flags= 0x{:X}, validate= {}", p.l2_len(), p.l3_len(), p.l4_len(), p.ol_flags(), p.validate_tx_offload());
     } else {
         h.ip.update_checksum();
         update_tcp_checksum(p, h.ip.payload_size(0), h.ip.src(), h.ip.dst());
