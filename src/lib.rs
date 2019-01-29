@@ -75,10 +75,11 @@ pub trait HasTcpState {
     fn states(&self) -> Vec<TcpState>;
     fn get_last_stamp(&self) -> Option<u64>;
     fn get_first_stamp(&self) -> Option<u64>;
-    fn deltas_since_synsent_or_synrecv(&self) -> Vec<u32>;
+    fn deltas_to_base_stamp(&self) -> Vec<u32>;
     fn release_cause(&self) -> ReleaseCause;
     fn set_release_cause(&mut self, cause: ReleaseCause);
 }
+
 
 pub trait HasConData {
     fn sock(&self) -> (u32, u16);
@@ -122,6 +123,11 @@ impl ConRecord {
     #[inline]
     pub fn role(&self) -> TcpRole {
         TcpRole::from(self.role)
+    }
+
+    #[inline]
+    pub fn base_stamp(&self) -> u64 {
+        self.base_stamp
     }
 
 
@@ -185,6 +191,15 @@ impl HasTcpState for ConRecord {
     }
 
     #[inline]
+    fn states(&self) -> Vec<TcpState> {
+        let mut result = vec![TcpState::Listen; self.state_count as usize];
+        for i in 0..self.state_count as usize {
+            result[i] = TcpState::from(self.state[i]);
+        }
+        result
+    }
+
+    #[inline]
     fn get_last_stamp(&self) -> Option<u64> {
         match self.state_count {
             0 => None,
@@ -203,8 +218,7 @@ impl HasTcpState for ConRecord {
         }
     }
 
-    fn deltas_since_synsent_or_synrecv(&self) -> Vec<u32> {
-        //let synsent = self.stamps[1];
+    fn deltas_to_base_stamp(&self) -> Vec<u32> {
         if self.state_count >= 3 {
             self.stamps[0..(self.state_count as usize - 2)].iter().map(|s| *s).collect()
         } else {
@@ -213,12 +227,8 @@ impl HasTcpState for ConRecord {
     }
 
     #[inline]
-    fn states(&self) -> Vec<TcpState> {
-        let mut result = vec![TcpState::Listen; self.state_count as usize];
-        for i in 0..self.state_count as usize {
-            result[i] = TcpState::from(self.state[i]);
-        }
-        result
+    fn release_cause(&self) -> ReleaseCause {
+        ReleaseCause::from(self.release_cause)
     }
 
     #[inline]
@@ -226,10 +236,6 @@ impl HasTcpState for ConRecord {
         self.release_cause = cause as u8;
     }
 
-    #[inline]
-    fn release_cause(&self) -> ReleaseCause {
-        ReleaseCause::from(self.release_cause)
-    }
 }
 
 impl fmt::Display for ConRecord {
@@ -248,7 +254,7 @@ impl fmt::Display for ConRecord {
             self.states(),
             self.release_cause(),
             self.base_stamp.separated_string(),
-            self.deltas_since_synsent_or_synrecv()
+            self.deltas_to_base_stamp()
                 .iter()
                 .map(|u| u.separated_string())
                 .collect::<Vec<_>>(),
@@ -335,7 +341,7 @@ impl<T> HasTcpState for ExtendedConRecord<T> {
     fn get_first_stamp(&self) -> Option<u64> { self.c_conrec.get_first_stamp() }
 
     #[inline]
-    fn deltas_since_synsent_or_synrecv(&self) -> Vec<u32> { self.c_conrec.deltas_since_synsent_or_synrecv() }
+    fn deltas_to_base_stamp(&self) -> Vec<u32> { self.c_conrec.deltas_to_base_stamp() }
 
     #[inline]
     fn release_cause(&self) -> ReleaseCause { self.c_conrec.release_cause() }
