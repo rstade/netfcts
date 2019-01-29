@@ -20,6 +20,13 @@ pub mod system;
 pub mod io;
 pub mod errors;
 pub mod utils;
+mod recstore;
+
+pub use recstore::RecordStore;
+pub use recstore::SimpleStore;
+pub use recstore::Store64;
+pub use recstore::Storable;
+pub use recstore::ConRecordOperations;
 
 use std::collections::HashMap;
 
@@ -27,12 +34,7 @@ use std::net::{Ipv4Addr, SocketAddrV4};
 use std::process::Command;
 use std::sync::Arc;
 use std::fmt;
-use std::slice::Iter;
-use std::cmp::Ordering;
-use std::cell::RefCell;
-use std::rc::Rc;
 use std::mem;
-use std::fmt::Display;
 
 use ipnet::Ipv4Net;
 use separator::Separatable;
@@ -92,11 +94,6 @@ pub trait HasConData {
     fn set_server_index(&mut self, index: u8);
     fn payload_packets(&self) -> u32;
     fn increment_payload_packets(&mut self) -> u32;
-}
-
-
-pub trait Storable: Sized + Display + Clone {
-    fn new() -> Self;
 }
 
 
@@ -283,288 +280,6 @@ impl Storable for ConRecord {
     }
 }
 
-
-#[derive(Clone, Copy, Debug)]
-#[repr(align(64))]
-pub struct ExtendedConRecord<T> {
-    c_conrec: ConRecord,
-    extension: T,
-}
-
-impl<T> ExtendedConRecord<T> {
-    pub fn extension(&self) -> &T {
-        &self.extension
-    }
-
-    pub fn extension_mut(&mut self) -> &mut T {
-        &mut self.extension
-    }
-
-    pub fn con_record(&self) -> &ConRecord {
-        &self.c_conrec
-    }
-
-    pub fn con_record_mut(&mut self) -> &mut ConRecord {
-        &mut self.c_conrec
-    }
-}
-
-impl<T> Storable for ExtendedConRecord<T>
-where T: Storable {
-    #[inline]
-    fn new() -> ExtendedConRecord<T> {
-        ExtendedConRecord {
-            c_conrec: ConRecord::new(),
-            extension: T::new(),
-        }
-    }
-}
-
-// need urgently the delegation feature of Rust, draft RFC 2393
-impl<T> HasTcpState for ExtendedConRecord<T> {
-
-    #[inline]
-    fn push_state(&mut self, state: TcpState) {
-        self.c_conrec.push_state(state)
-    }
-
-    #[inline]
-    fn last_state(&self) -> TcpState { self.c_conrec.last_state() }
-
-    #[inline]
-    fn states(&self) -> Vec<TcpState> { self.c_conrec.states() }
-
-    #[inline]
-    fn get_last_stamp(&self) -> Option<u64> { self.c_conrec.get_last_stamp() }
-
-    #[inline]
-    fn get_first_stamp(&self) -> Option<u64> { self.c_conrec.get_first_stamp() }
-
-    #[inline]
-    fn deltas_to_base_stamp(&self) -> Vec<u32> { self.c_conrec.deltas_to_base_stamp() }
-
-    #[inline]
-    fn release_cause(&self) -> ReleaseCause { self.c_conrec.release_cause() }
-
-    #[inline]
-    fn set_release_cause(&mut self, cause: ReleaseCause) { self.c_conrec.set_release_cause(cause) }
-}
-
-impl<T> HasConData for ExtendedConRecord<T> {
-    #[inline]
-    fn sock(&self) -> (u32, u16) { self.c_conrec.sock() }
-
-    #[inline]
-    fn set_sock(&mut self, s: (u32, u16)) { self.c_conrec.set_sock(s) }
-
-    #[inline]
-    fn port(&self) -> u16 { self.c_conrec.port() }
-
-    #[inline]
-    fn set_port(&mut self, port: u16) { self.c_conrec.set_port(port) }
-
-    #[inline]
-    fn uid(&self) -> u64 { self.c_conrec.uid() }
-
-    #[inline]
-    fn set_uid(&mut self, uid: u64) { self.c_conrec.set_uid(uid) }
-
-    #[inline]
-    fn server_index(&self) -> u8 { self.c_conrec.server_index() }
-
-    #[inline]
-    fn set_server_index(&mut self, index: u8) { self.c_conrec.set_server_index(index) }
-
-    #[inline]
-    fn payload_packets(&self) -> u32 { self.c_conrec.payload_packets() }
-
-    #[inline]
-    fn increment_payload_packets(&mut self) -> u32 { self.c_conrec.increment_payload_packets() }
-
-}
-
-impl<T> fmt::Display for ExtendedConRecord<T>
-where T: Display {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(
-            f,
-            "({}, {})",
-            self.c_conrec,
-            self.extension,
-        )
-    }
-}
-
-pub struct RecordStore<T: Storable> {
-    store: Vec<T>,
-    used_slots: usize,
-}
-
-impl<T: Storable> fmt::Debug for RecordStore<T> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        for i in 0..self.used_slots - 1 {
-            write!(f, "{}", self.store[i])?;
-        }
-        Ok(())
-    }
-}
-
-impl<T: Storable> RecordStore<T> {
-    pub fn with_capacity(capacity: usize) -> RecordStore<T> {
-        RecordStore {
-            store: vec![T::new(); capacity],
-            used_slots: 0,
-        }
-    }
-
-    #[inline]
-    pub fn get_unused_slot(&mut self) -> usize {
-        assert!(self.used_slots < self.store.len());
-        self.used_slots += 1;
-        self.used_slots - 1
-    }
-
-    #[inline]
-    pub fn len(&self) -> usize {
-        self.used_slots
-    }
-
-    #[inline]
-    pub fn iter(&self) -> Iter<T> {
-        self.store[0..self.used_slots].iter()
-    }
-
-    #[inline]
-    pub fn get_mut(&mut self, slot: usize) -> Option<&mut T> {
-        if slot < self.used_slots {
-            Some(&mut self.store[slot])
-        } else {
-            None
-        }
-    }
-
-    #[inline]
-    pub fn get(&self, slot: usize) -> Option<&T> {
-        if slot < self.used_slots {
-            Some(&self.store[slot])
-        } else {
-            None
-        }
-    }
-
-    pub fn sort_by<F>(&mut self, compare: F)
-        where F: FnMut(&T, &T) -> Ordering {
-        self.store[0..self.used_slots].sort_by(compare)
-    }
-}
-/*
-impl Iterator for RecordStore {
-    type Item = ConRecord;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.store.iter().next()
-    }
-}
-*/
-
-pub trait ConRecordOperations<T: Storable + HasConData + HasTcpState> {
-    /// return reference to reference counted pointer to store for the connection
-    #[inline]
-    fn store(&self) -> &Rc<RefCell<RecordStore<T>>>;
-
-    /// return index of connection record in store
-    #[inline]
-    fn con_rec(&self) -> usize;
-
-    /// remove references to connection record and its store from connection
-    #[inline]
-    fn release_conrec(&mut self);
-
-    #[inline]
-    fn con_established(&mut self) {
-        self.store().borrow_mut().get_mut(self.con_rec()).unwrap().push_state(TcpState::Established);
-    }
-
-    #[inline]
-    fn server_syn_sent(&mut self) {
-        self.store().borrow_mut().get_mut(self.con_rec()).unwrap().push_state(TcpState::SynSent);
-        //self.con_rec().s_syn_sent = utils::rdtsc_unsafe();
-    }
-
-    #[inline]
-    fn port(&self) -> u16 {
-        self.store().borrow().get(self.con_rec()).unwrap().port()
-    }
-
-    #[inline]
-    fn in_use(&self) -> bool;
-
-    #[inline]
-    fn server_index(&self) -> usize {
-        self.store().borrow().get(self.con_rec()).unwrap().server_index() as usize
-    }
-
-    #[inline]
-    fn set_server_index(&mut self, index: usize) {
-        self.store().borrow_mut().get_mut(self.con_rec()).unwrap().set_server_index(index as u8)
-    }
-
-    #[inline]
-    fn payload_packets(&self) -> usize {
-        self.store().borrow().get(self.con_rec()).unwrap().payload_packets() as usize
-    }
-
-    #[inline]
-    fn increment_payload_packets(&self) -> usize {
-        self.store().borrow_mut().get_mut(self.con_rec()).unwrap().increment_payload_packets() as usize
-    }
-
-    #[inline]
-    fn last_state(&self) -> TcpState {
-        self.store().borrow().get(self.con_rec()).unwrap().last_state()
-    }
-
-    #[inline]
-    fn states(&self) -> Vec<TcpState> {
-        self.store().borrow().get(self.con_rec()).unwrap().states()
-    }
-
-    #[inline]
-    fn push_state(&self, state: TcpState) {
-        self.store().borrow_mut().get_mut(self.con_rec()).unwrap().push_state(state)
-    }
-
-    #[inline]
-    fn set_release_cause(&self, cause: ReleaseCause) {
-        self.store().borrow_mut().get_mut(self.con_rec()).unwrap().set_release_cause(cause)
-    }
-
-    #[inline]
-    fn set_port(&mut self, port: u16) {
-        self.store().borrow_mut().get_mut(self.con_rec()).unwrap().set_port(port);
-    }
-
-    #[inline]
-    fn sock(&self) -> Option<(u32, u16)> {
-        let s= self.store().borrow().get(self.con_rec()).unwrap().sock();
-        if s.0 != 0 { Some(s) } else { None }
-    }
-
-    #[inline]
-    fn set_sock(&mut self, sock: (u32, u16)) {
-        self.store().borrow_mut().get_mut(self.con_rec()).unwrap().set_sock(sock);
-    }
-
-    #[inline]
-    fn set_uid(&mut self, uid: u64) {
-        self.store().borrow_mut().get_mut(self.con_rec()).unwrap().set_uid(uid);
-    }
-
-    #[inline]
-    fn get_uid(&self) -> u64 {
-        self.store().borrow().get(self.con_rec()).unwrap().uid()
-    }
-}
 
 #[inline]
 pub fn is_kni_core(pci: &CacheAligned<PortQueue>) -> bool {
