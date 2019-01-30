@@ -240,13 +240,13 @@ impl fmt::Display for ConRecord {
         write!(
             f,
             "({:?}, {:21}, {:6}, {:3}, {:?}, {:?}, {}, {:?})",
-            self.role,
+            self.role(),
             if self.client_ip != 0 {
                 SocketAddrV4::new(Ipv4Addr::from(self.client_ip), self.client_port).to_string()
             } else {
                 "none".to_string()
             },
-            self.port,
+            self.port(),
             self.server_index,
             self.states(),
             self.release_cause(),
