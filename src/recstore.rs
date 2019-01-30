@@ -132,7 +132,7 @@ impl<T: Storable> Store64<T> {
     #[inline]
     pub fn get_unused_slot(&mut self) -> usize {
         // changed to wrap around
-        if self.used_slots >= self.store_0.len() || self.used_slots < self.store_1.len() {
+        if self.used_slots >= self.store_0.len() || self.used_slots >= self.store_1.len() {
             self.used_slots = 0;
             warn!("wrapping around record storage after exceeding max sizes = {}/{}", self.store_0.len(), self.store_1.len());
         }
