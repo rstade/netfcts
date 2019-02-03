@@ -29,6 +29,8 @@ pub enum MessageFrom<T> {
     CRecords(PipelineId, Option<T>, Option<T>), // pipeline_id, client, server
     FetchCounter,                                         // triggers fetching of counters from pipelines
     FetchCRecords,
+    /// e.g. start and stop stamp
+    TimeStamps(PipelineId, u64, u64),
     Exit, // exit recv thread
 }
 
@@ -39,5 +41,6 @@ pub enum MessageTo<T> {
     Counter(PipelineId, TcpCounter, TcpCounter, Option<Vec<(u64, usize, usize)>>),
     CRecords(PipelineId, Option<T>, Option<T>),
     StartGenerator,
+    TimeStamps(PipelineId, u64, u64),
     Exit, // exit recv thread
 }

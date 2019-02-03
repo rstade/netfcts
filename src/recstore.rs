@@ -52,7 +52,7 @@ impl<T: Storable> RecordStore<T> {
             self.overflow_count = self.record_count;
         }
         self.record_count += 1;
-        self.record_count - 1
+        self.record_count - 1 - self.overflow_count
     }
 
     /// the number of records which are stored (excluding overwritten records)
@@ -68,32 +68,31 @@ impl<T: Storable> RecordStore<T> {
 
     pub fn sort_by<F>(&mut self, compare: F)
         where F: FnMut(&T, &T) -> cmp::Ordering {
-        let len= self.len();
+        let len = self.len();
         self.store[0..len].sort_by(compare)
     }
 
     #[inline]
     pub fn get(&self, slot: usize) -> &T {
-        &self.store[slot - self.overflow_count]
+        &self.store[slot]
     }
 
     #[inline]
     pub fn get_mut(&mut self, slot: usize) -> &mut T {
-        &mut self.store[slot - self.overflow_count]
+        &mut self.store[slot]
     }
 }
 
 /// we need trait SimpleStore for the ConRecordOperations trait
 impl SimpleStore for RecordStore<ConRecord> {
-
     #[inline]
     fn get(&self, slot: usize) -> &ConRecord {
-        &self.store[slot - self.overflow_count]
+        &self.store[slot]
     }
 
     #[inline]
     fn get_mut(&mut self, slot: usize) -> &mut ConRecord {
-        &mut self.store[slot - self.overflow_count]
+        &mut self.store[slot]
     }
 }
 
@@ -123,7 +122,7 @@ impl<T: Storable> Store64<T> {
             self.overflow_count = self.record_count;
         }
         self.record_count += 1;
-        self.record_count - 1
+        self.record_count - 1 - self.overflow_count
     }
 
     #[inline]
@@ -141,35 +140,37 @@ impl<T: Storable> Store64<T> {
         self.store_1[0..self.len()].iter()
     }
 
+    pub fn iter(&self) -> std::iter::Zip<std::slice::Iter<'_, ConRecord>, std::slice::Iter<'_, T>> {
+        self.iter_0().zip(self.iter_1())
+    }
+
     #[inline]
     pub fn get_mut_1(&mut self, slot: usize) -> &mut T {
-        &mut self.store_1[slot - self.overflow_count]
+        &mut self.store_1[slot]
     }
 
     #[inline]
     pub fn get_1(&self, slot: usize) -> &T {
-        &self.store_1[slot - self.overflow_count]
+        &self.store_1[slot]
     }
 
     pub fn sort_0_by<F>(&mut self, compare: F)
         where F: FnMut(&ConRecord, &ConRecord) -> cmp::Ordering {
-        let n_records= self.len();
+        let n_records = self.len();
         self.store_0[0..n_records].sort_by(compare)
     }
 }
 
-impl<T:Storable> SimpleStore for Store64<T> {
-
+impl<T: Storable> SimpleStore for Store64<T> {
     #[inline]
     fn get(&self, slot: usize) -> &ConRecord {
-        &self.store_0[slot - self.overflow_count]
+        &self.store_0[slot]
     }
 
     #[inline]
     fn get_mut(&mut self, slot: usize) -> &mut ConRecord {
-        &mut self.store_0[slot - self.overflow_count]
+        &mut self.store_0[slot]
     }
-
 }
 
 
@@ -190,21 +191,6 @@ pub trait ConRecordOperations<S: SimpleStore> {
     /// return index of connection record in store
     #[inline]
     fn con_rec(&self) -> usize;
-
-    /// remove references to connection record and its store from connection
-    #[inline]
-    fn release_conrec(&mut self);
-
-    #[inline]
-    fn con_established(&mut self) {
-        self.store().borrow_mut().get_mut(self.con_rec()).push_state(TcpState::Established);
-    }
-
-    #[inline]
-    fn server_syn_sent(&mut self) {
-        self.store().borrow_mut().get_mut(self.con_rec()).push_state(TcpState::SynSent);
-        //self.con_rec().s_syn_sent = utils::rdtsc_unsafe();
-    }
 
     #[inline]
     fn port(&self) -> u16 {
@@ -235,18 +221,8 @@ pub trait ConRecordOperations<S: SimpleStore> {
     }
 
     #[inline]
-    fn last_state(&self) -> TcpState {
-        self.store().borrow().get(self.con_rec()).last_state()
-    }
-
-    #[inline]
     fn states(&self) -> Vec<TcpState> {
         self.store().borrow().get(self.con_rec()).states()
-    }
-
-    #[inline]
-    fn push_state(&self, state: TcpState) {
-        self.store().borrow_mut().get_mut(self.con_rec()).push_state(state)
     }
 
     #[inline]

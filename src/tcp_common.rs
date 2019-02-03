@@ -46,7 +46,6 @@ impl convert::From<u8> for TcpState {
 pub enum TcpRole {
     Client=0,
     Server,
-    Proxy,
 }
 
 impl convert::From<u8> for TcpRole {
@@ -54,7 +53,6 @@ impl convert::From<u8> for TcpRole {
         match i {
             0 => TcpRole::Client,
             1 => TcpRole::Server,
-            2 => TcpRole::Proxy,
             _ => TcpRole::Client,
         }
     }
@@ -136,6 +134,15 @@ impl convert::From<u8> for ReleaseCause {
     }
 }
 
+
+#[inline]
+pub fn tcp_start_state(role: TcpRole) -> TcpState {
+    if role == TcpRole::Client {
+        TcpState::Closed
+    } else {
+        TcpState::Listen
+    }
+}
 
 
 impl fmt::Display for TcpStatistics {

@@ -49,22 +49,24 @@ use e2d2::native::zcsi::ipv4_phdr_chksum;
 use e2d2::headers::{EndOffset, IpHeader, MacHeader, TcpHeader};
 
 use tcp_common::{ReleaseCause, TcpRole, TcpState, L234Data};
+use tcp_common::tcp_start_state;
 
 #[derive(Clone, Copy, Debug)]
-#[repr(align(64))]
+//#[repr(align(64))]
 pub struct ConRecord {
     base_stamp: u64,
     uid: u64,
     stamps: [u32; 6],
-    state: [u8; 8],
     payload_packets: u32,
     client_ip: u32,
     client_port: u16,
     port: u16,
+    state: [u8; 7],
     state_count: u8,
     server_index: u8,
     release_cause: u8,
     role: u8,
+    server_state: u8,
 }
 
 // we map cycle differences from u64 to u32 to minimize record size in the cache (performance)
@@ -94,27 +96,25 @@ pub trait HasConData {
     fn set_server_index(&mut self, index: u8);
     fn payload_packets(&self) -> u32;
     fn increment_payload_packets(&mut self) -> u32;
+    fn server_state(&self) -> TcpState;
+    fn set_server_state(&mut self, state: TcpState);
 }
 
 
 impl ConRecord {
     #[inline]
     pub fn init(&mut self, role: TcpRole, port: u16, sock: Option<(u32, u16)>) {
-        self.port = port;
-        self.state_count = 1;
+        self.state_count = 0;
         self.base_stamp = 0;
         self.payload_packets = 0;
-        if role == TcpRole::Server {
-            self.state[0] = TcpState::Listen as u8;
-        } else {
-            self.state[0] = TcpState::Closed as u8;
-        }
         self.uid = e2d2_utils::rdtsc_unsafe();
         self.server_index = 0;
         let s = sock.unwrap_or((0, 0));
         self.client_ip = s.0;
         self.client_port = s.1;
         self.role = role as u8;
+        self.port = port;
+        self.server_state = tcp_start_state(self.role()) as u8;
     }
 
     #[inline]
@@ -167,31 +167,48 @@ impl HasConData for ConRecord {
         self.payload_packets
     }
 
+    #[inline]
+    fn server_state(&self) -> TcpState {
+        TcpState::from(self.server_state)
+    }
+
+    #[inline]
+    fn set_server_state(&mut self, state: TcpState) {
+        self.server_state = state as u8;
+    }
 
 }
+
+
 
 impl HasTcpState for ConRecord {
     #[inline]
     fn push_state(&mut self, state: TcpState) {
         self.state[self.state_count as usize] = state as u8;
-        if self.state_count == 1 {
+        if self.state_count == 0 {
             self.base_stamp = e2d2_utils::rdtsc_unsafe();
         } else {
-            self.stamps[self.state_count as usize - 2] = ((e2d2_utils::rdtsc_unsafe() - self.base_stamp) / TIME_STAMP_REDUCTION_FACTOR) as u32;
+            self.stamps[self.state_count as usize - 1] = ((e2d2_utils::rdtsc_unsafe() - self.base_stamp) / TIME_STAMP_REDUCTION_FACTOR) as u32;
         }
         self.state_count += 1;
     }
 
+
+
     #[inline]
     fn last_state(&self) -> TcpState {
-        TcpState::from(self.state[self.state_count as usize - 1])
+        if self.state_count == 0 {
+            tcp_start_state(self.role())
+        } else {
+            TcpState::from(self.state[self.state_count as usize - 1])
+        }
     }
 
     #[inline]
     fn states(&self) -> Vec<TcpState> {
-        let mut result = vec![TcpState::Listen; self.state_count as usize];
+        let mut result = vec![tcp_start_state(self.role()); self.state_count as usize +1];
         for i in 0..self.state_count as usize {
-            result[i] = TcpState::from(self.state[i]);
+            result[i+1] = TcpState::from(self.state[i]);
         }
         result
     }
@@ -200,15 +217,14 @@ impl HasTcpState for ConRecord {
     fn get_last_stamp(&self) -> Option<u64> {
         match self.state_count {
             0 => None,
-            1 => None,
-            2 => Some(self.base_stamp),
-            _ => Some(self.base_stamp + self.stamps[self.state_count as usize - 3] as u64 * TIME_STAMP_REDUCTION_FACTOR)
+            1 => Some(self.base_stamp),
+            _ => Some(self.base_stamp + self.stamps[self.state_count as usize - 2] as u64 * TIME_STAMP_REDUCTION_FACTOR)
         }
     }
 
     #[inline]
     fn get_first_stamp(&self) -> Option<u64> {
-        if self.state_count > 1 {
+        if self.state_count > 0 {
             Some(self.base_stamp)
         } else {
             None
@@ -216,8 +232,8 @@ impl HasTcpState for ConRecord {
     }
 
     fn deltas_to_base_stamp(&self) -> Vec<u32> {
-        if self.state_count >= 3 {
-            self.stamps[0..(self.state_count as usize - 2)].iter().map(|s| *s).collect()
+        if self.state_count >= 2 {
+            self.stamps[0..(self.state_count as usize - 1)].iter().map(|s| *s).collect()
         } else {
             vec![]
         }
@@ -269,13 +285,14 @@ impl Storable for ConRecord {
             // we are using an Array, not Vec for the state history, the latter eats too much performance
             state_count: 0,
             base_stamp: 0,
-            state: [TcpState::Closed as u8; 8],
+            state: [TcpState::Closed as u8; 7],
             stamps: [0u32; 6],
             port: 0u16,
             client_ip: 0,
             client_port: 0,
             payload_packets: 0,
             uid: 0,
+            server_state: TcpState::Listen as u8
         }
     }
 }
@@ -519,26 +536,8 @@ pub fn remove_tcp_options<M: Sized + Send>(p: &mut Packet<TcpHeader, M>, h: &mut
         p.trim_payload_size(trim_by as usize);
     }
 }
-/*
-#[inline]
-pub fn make_reply_packet(h: &mut HeaderState) {
-    let smac = h.mac.src;
-    let dmac = h.mac.dst;
-    let sip = h.ip.src();
-    let dip = h.ip.dst();
-    let sport = h.tcp.src_port();
-    let dport = h.tcp.dst_port();
-    h.mac.set_smac(&dmac);
-    h.mac.set_dmac(&smac);
-    h.ip.set_dst(sip);
-    h.ip.set_src(dip);
-    h.tcp.set_src_port(dport);
-    h.tcp.set_dst_port(sport);
-    h.tcp.set_ack_flag();
-    let ack_num = h.tcp.seq_num().wrapping_add(1);
-    h.tcp.set_ack_num(ack_num);
-}
-*/
+
+
 #[inline]
 pub fn make_reply_packet(h: &mut HeaderState, inc: u32) {
     let smac = h.mac.src;
