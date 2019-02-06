@@ -533,6 +533,9 @@ pub fn remove_tcp_options<M: Sized + Send>(p: &mut Packet<TcpHeader, M>, h: &mut
         //                        let trim_by = min(p.data_len() - 60usize, (old_offset - 20u16) as usize);
         //                        82599 does padding itself !?
         let trim_by = old_offset - 20;
+        let payload_sz=p.payload_size(); // this may include padding bytes
+        let written= p.write_from_tail_down(payload_sz, 0x0u8);
+        debug!("erased {} bytes from a payload of {} bytes", written, payload_sz);
         p.trim_payload_size(trim_by as usize);
     }
 }
