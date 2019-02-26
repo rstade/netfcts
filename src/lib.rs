@@ -255,7 +255,7 @@ impl fmt::Display for ConRecord {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
             f,
-            "({:?}, {:21}, {:6}, {:3}, {:?}, {:?}, {}, {:?})",
+            "({:?}, {:21}, {:6}, {:3}, {:7}, {:?}, {:?}, {}, {:?})",
             self.role(),
             if self.client_ip != 0 {
                 SocketAddrV4::new(Ipv4Addr::from(self.client_ip), self.client_port).to_string()
@@ -264,6 +264,7 @@ impl fmt::Display for ConRecord {
             },
             self.port(),
             self.server_index,
+            self.payload_packets,
             self.states(),
             self.release_cause(),
             self.base_stamp.separated_string(),
@@ -282,7 +283,6 @@ impl Storable for ConRecord {
             role: TcpRole::Client as u8,
             server_index: 0,
             release_cause: ReleaseCause::Unknown as u8,
-            // we are using an Array, not Vec for the state history, the latter eats too much performance
             state_count: 0,
             base_stamp: 0,
             state: [TcpState::Closed as u8; 7],
@@ -408,8 +408,8 @@ pub fn initialize_flowdirector(
     context: &NetBricksContext,
     steering_mode: FlowSteeringMode,
     ipnet: &Ipv4Net,
-) -> HashMap<i32, Arc<FlowDirector>> {
-    let mut fdir_map: HashMap<i32, Arc<FlowDirector>> = HashMap::new();
+) -> HashMap<u16, Arc<FlowDirector>> {
+    let mut fdir_map: HashMap<u16, Arc<FlowDirector>> = HashMap::new();
     for port in context.ports.values() {
         if *port.port_type() == PortType::Dpdk {
             // initialize flow director on port, cannot do this in parallel from multiple threads

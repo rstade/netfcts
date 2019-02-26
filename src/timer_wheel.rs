@@ -41,7 +41,6 @@ where
             no_slots,
             last_slot: no_slots - 1,
             last_advance: 0,
-            //start: now - resolution_cycles,
             start: 0,
             slots: vec![Vec::with_capacity(slot_capacity); no_slots],
         }
@@ -87,16 +86,17 @@ where
         (None, false)
     }
 
-    /// schedules a new element and returen the slot and the index in the wheel
+    /// schedules a new element and returns the slot and the index in the wheel
     #[inline]
     pub fn schedule(&mut self, after_cycles: &u64, what: T) -> (u16, u16)
     where
         T: Debug,
     {
         let now = utils::rdtsc_unsafe();
+        //initialize start time
         if self.start == 0 {
             self.start = now - self.resolution_cycles;
-        } //initialize start time
+        }
         let dur = *after_cycles + now - self.start;
         let slots = dur / self.resolution_cycles - 1;
         let slot = slots.wrapping_rem(self.no_slots as u64);
