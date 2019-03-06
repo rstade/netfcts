@@ -492,7 +492,8 @@ pub fn prepare_checksum_and_ttl<M: Sized + Send>(p: &mut Packet<TcpHeader, M>, h
     if ttl >= 1 {
         h.ip.set_ttl(ttl - 1);
     }
-
+    //often the mbuf still contains rx offload flags if we received it from the NIC, this may fail the tx offload logic
+    p.clear_rx_offload_flags();
     if p.tcp_checksum_tx_offload() {
         h.ip.set_csum(0);
         unsafe {
