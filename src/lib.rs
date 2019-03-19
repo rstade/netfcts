@@ -41,7 +41,7 @@ use separator::Separatable;
 use eui48::MacAddress;
 
 use e2d2::allocators::CacheAligned;
-use e2d2::interface::{FlowDirector, PmdPort, PortQueue, PortType, Packet};
+use e2d2::interface::{FlowDirector, PmdPort, PortQueue, PortQueueTxBuffered, PortType, Packet};
 use e2d2::interface::update_tcp_checksum;
 use e2d2::scheduler::NetBricksContext;
 use e2d2::utils as e2d2_utils;
@@ -389,6 +389,69 @@ pub fn setup_kni(kni_name: &str, ip_net: &Ipv4Net, mac_address: &String, kni_net
         .expect("failed to show IP address of kni i/f");
     let reply2 = output2.stdout;
     info!("show IP addr: {}\n {}", output.status, String::from_utf8_lossy(&reply2));
+}
+
+pub fn new_port_queues_for_core(core: i32,  pmd_ports: &HashMap<String, Arc<PmdPort>>) -> (CacheAligned<PortQueueTxBuffered>, CacheAligned<PortQueue>) {
+    let mut kni: Option<CacheAligned<PortQueue>> = None;
+    let mut pci: Option<CacheAligned<PortQueueTxBuffered>> = None;
+    // maps port_id to kni device and core for the kni master
+    let mut kni_ports: HashMap<u16, &Arc<PmdPort>> = HashMap::new();
+
+    for (name, pmd_port) in pmd_ports {
+        if pmd_port.is_kni() {
+            let before= kni_ports.insert(pmd_port.port_id(), pmd_port);
+            if before.is_some() { error!("duplicate KNI port in configuration, port_id= {}", pmd_port.port_id())}
+        }
+        for (xq, c)  in pmd_port.rx_cores.as_ref().expect("rx_cores not set").iter().enumerate() {
+            if *c == core { // found our core
+                // currently the pipeline must run the rx and tx queues with the same index
+                assert_eq!(pmd_port.tx_cores.as_ref().expect("tx cores not set")[xq], core);
+
+                if pmd_port.is_kni() {
+                    let port = PmdPort::new_queue_pair(pmd_port, xq as u16, xq as u16).expect(
+                        &format!("Queue {} on port {} could not be initialized", xq, name)
+                    );
+                    debug!(
+                        "setup_pipeline on core {} for kni port {} --  {} rxq {} txq {}",
+                        core,
+                        name,
+                        pmd_port.mac_address(),
+                        port.rxq(),
+                        port.txq(),
+                    );
+                    if kni.is_some() { panic!("currently not more than one kni device can be handled per core, core = {}", core); }
+                    kni = Some(port);
+                } else {
+                    let port = PmdPort::new_tx_buffered_queue_pair(pmd_port, xq as u16, xq as u16).expect(
+                        &format!("Queue {} on port {} could not be initialized", xq, name)
+                    );
+                    debug!(
+                        "setup_pipeline on core {} for dpdk port {} --  {} rxq {} txq {}",
+                        core,
+                        name,
+                        pmd_port.mac_address(),
+                        port.port_queue.rxq(),
+                        port.port_queue.txq(),
+                    );
+                    if pci.is_some() { panic!("currently not more than one dpdk port can be handled per core, core = {}", core); }
+                    pci = Some(port);
+                }
+            }
+        }
+    }
+
+    if pci.is_none() {
+        panic!("no pci port found for pipeline on core {}", core);
+    }
+
+    if kni.is_none() {
+        let pmd_kni= kni_ports.get(&pci.as_ref().unwrap().port_queue.port_id());
+        if pmd_kni.is_none() { error!("missing kni device for dpdk port with port-id {}", pci.as_ref().unwrap().port_queue.port_id())}
+        kni = Some(PmdPort::new_queue_pair(pmd_kni.unwrap(), 0, 0).expect(
+            &format!("KNI port with port_id {} could not be initialized", pmd_kni.unwrap().port_id())
+        ));
+    }
+    (pci.unwrap(), kni.unwrap())
 }
 
 #[derive(Deserialize, Clone, Copy, PartialEq)]

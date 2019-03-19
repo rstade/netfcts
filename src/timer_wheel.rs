@@ -100,7 +100,7 @@ where
         let dur = *after_cycles + now - self.start;
         let slots = dur / self.resolution_cycles - 1;
         let slot = slots.wrapping_rem(self.no_slots as u64);
-        //debug!("scheduling port {:?} at {:?} in slot {}", what, when.separated_string(), slot);
+        debug!("scheduling port {:?} at {:?} in slot {}", what, self.slots[slot as usize].len(), slot);
         self.slots[slot as usize].push(what);
         (slot as u16, (self.slots[slot as usize].len()-1) as u16)
     }
@@ -110,6 +110,7 @@ where
     pub fn replace(&mut self, slot_and_index: (u16, u16), new_element: T) -> Option<T> {
         let slot= slot_and_index.0 as usize;
         let index = slot_and_index.1 as usize;
+        debug!("replace: slot = {}, index = {}", slot, index);
         if index < self.slots[slot].len() {
             let old=self.slots[slot][index].clone();
             self.slots[slot][index]=new_element;
