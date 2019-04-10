@@ -7,11 +7,9 @@ use std::rc::Rc;
 use {ConRecord, HasConData, HasTcpState, ReleaseCause};
 use TcpState;
 
-
 pub trait Storable: Sized + Display + Clone {
     fn new() -> Self;
 }
-
 
 pub trait SimpleStore {
     #[inline]
@@ -48,7 +46,12 @@ impl<T: Storable> RecordStore<T> {
         // changed to wrap around
         if self.record_count - self.overflow_count == self.store.len() {
             let wraps = self.record_count / self.store.len();
-            warn!("wrapping record storage after exceeding max size = {}, now {} wraps, record_count = {}", self.store.len(), wraps, self.record_count);
+            warn!(
+                "wrapping record storage after exceeding max size = {}, now {} wraps, record_count = {}",
+                self.store.len(),
+                wraps,
+                self.record_count
+            );
             self.overflow_count = self.record_count;
         }
         self.record_count += 1;
@@ -67,7 +70,9 @@ impl<T: Storable> RecordStore<T> {
     }
 
     pub fn sort_by<F>(&mut self, compare: F)
-        where F: FnMut(&T, &T) -> cmp::Ordering {
+    where
+        F: FnMut(&T, &T) -> cmp::Ordering,
+    {
         let len = self.len();
         self.store[0..len].sort_by(compare)
     }
@@ -96,7 +101,6 @@ impl SimpleStore for RecordStore<ConRecord> {
     }
 }
 
-
 pub struct Store64<T: Storable> {
     store_0: Vec<ConRecord>,
     store_1: Vec<T>,
@@ -118,7 +122,12 @@ impl<T: Storable> Store64<T> {
     pub fn get_next_slot(&mut self) -> usize {
         if self.record_count - self.overflow_count == self.store_0.len() {
             let wraps = self.record_count / self.store_0.len();
-            warn!("wrapping record storage after exceeding max size = {}, now {} wraps, record_count = {}", self.store_0.len(), wraps, self.record_count);
+            warn!(
+                "wrapping record storage after exceeding max size = {}, now {} wraps, record_count = {}",
+                self.store_0.len(),
+                wraps,
+                self.record_count
+            );
             self.overflow_count = self.record_count;
         }
         self.record_count += 1;
@@ -155,7 +164,9 @@ impl<T: Storable> Store64<T> {
     }
 
     pub fn sort_0_by<F>(&mut self, compare: F)
-        where F: FnMut(&ConRecord, &ConRecord) -> cmp::Ordering {
+    where
+        F: FnMut(&ConRecord, &ConRecord) -> cmp::Ordering,
+    {
         let n_records = self.len();
         self.store_0[0..n_records].sort_by(compare)
     }
@@ -172,7 +183,6 @@ impl<T: Storable> SimpleStore for Store64<T> {
         &mut self.store_0[slot]
     }
 }
-
 
 impl<T: Storable> fmt::Debug for Store64<T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
@@ -207,17 +217,30 @@ pub trait ConRecordOperations<S: SimpleStore> {
 
     #[inline]
     fn set_server_index(&mut self, index: usize) {
-        self.store().borrow_mut().get_mut(self.con_rec()).set_server_index(index as u8)
+        self.store()
+            .borrow_mut()
+            .get_mut(self.con_rec())
+            .set_server_index(index as u8)
     }
 
     #[inline]
-    fn payload_packets(&self) -> usize {
-        self.store().borrow().get(self.con_rec()).payload_packets() as usize
+    fn sent_payload_pkts(&self) -> usize {
+        self.store().borrow().get(self.con_rec()).sent_payload_packets() as usize
     }
 
     #[inline]
-    fn increment_payload_packets(&self) -> usize {
-        self.store().borrow_mut().get_mut(self.con_rec()).increment_payload_packets() as usize
+    fn recv_payload_pkts(&self) -> usize {
+        self.store().borrow().get(self.con_rec()).recv_payload_packets() as usize
+    }
+
+    #[inline]
+    fn inc_sent_payload_pkts(&self) -> usize {
+        self.store().borrow_mut().get_mut(self.con_rec()).inc_sent_payload_pkts() as usize
+    }
+
+    #[inline]
+    fn inc_recv_payload_pkts(&self) -> usize {
+        self.store().borrow_mut().get_mut(self.con_rec()).inc_recv_payload_pkts() as usize
     }
 
     #[inline]
@@ -238,7 +261,11 @@ pub trait ConRecordOperations<S: SimpleStore> {
     #[inline]
     fn sock(&self) -> Option<(u32, u16)> {
         let s = self.store().borrow().get(self.con_rec()).sock();
-        if s.0 != 0 { Some(s) } else { None }
+        if s.0 != 0 {
+            Some(s)
+        } else {
+            None
+        }
     }
 
     #[inline]

@@ -4,8 +4,7 @@ use std::fmt;
 use std::fmt::Write;
 use std::net::SocketAddrV4;
 use std::ops::{Index, IndexMut};
-use e2d2::interface::Packet;
-use e2d2::headers::TcpHeader;
+use e2d2::interface::Pdu;
 
 use eui48::MacAddress;
 
@@ -41,10 +40,9 @@ impl convert::From<u8> for TcpState {
     }
 }
 
-
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum TcpRole {
-    Client=0,
+    Client = 0,
     Server,
 }
 
@@ -65,19 +63,20 @@ pub enum TcpStatistics {
     SentSynAck2 = 2,
     SentFin = 3,
     SentFinPssv = 4,
-    SentAck4Fin= 5,
+    SentAck4Fin = 5,
     SentAck = 6,
     RecvSyn = 7,
     RecvSynAck = 8,
     RecvSynAck2 = 9,
-    RecvFin = 10,           //FIN of active close
-    RecvFinPssv = 11,    //FIN of passive close
-    RecvAck4Fin = 12,       //ACK for a FIN packet
+    RecvFin = 10,     //FIN of active close
+    RecvFinPssv = 11, //FIN of passive close
+    RecvAck4Fin = 12, //ACK for a FIN packet
     RecvAck = 13,
     RecvRst = 14,
     Unexpected = 15,
-    Payload = 16,
-    Count = 17,
+    RecvPayload = 16,
+    SentPayload = 17,
+    Count = 18,
 }
 
 impl convert::From<usize> for TcpStatistics {
@@ -99,13 +98,13 @@ impl convert::From<usize> for TcpStatistics {
             13 => TcpStatistics::RecvAck,
             14 => TcpStatistics::RecvRst,
             15 => TcpStatistics::Unexpected,
-            16 => TcpStatistics::Payload,
-            17 => TcpStatistics::Count,
+            16 => TcpStatistics::RecvPayload,
+            17 => TcpStatistics::SentPayload,
+            18 => TcpStatistics::Count,
             _ => TcpStatistics::Count,
         }
     }
 }
-
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ReleaseCause {
@@ -117,7 +116,6 @@ pub enum ReleaseCause {
     ActiveRst = 5,
     MaxCauses = 6,
 }
-
 
 impl convert::From<u8> for ReleaseCause {
     fn from(i: u8) -> ReleaseCause {
@@ -134,7 +132,6 @@ impl convert::From<u8> for ReleaseCause {
     }
 }
 
-
 #[inline]
 pub fn tcp_start_state(role: TcpRole) -> TcpState {
     if role == TcpRole::Client {
@@ -143,7 +140,6 @@ pub fn tcp_start_state(role: TcpRole) -> TcpState {
         TcpState::Listen
     }
 }
-
 
 impl fmt::Display for TcpStatistics {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
@@ -216,9 +212,10 @@ pub struct CData {
 }
 
 impl CData {
-    pub fn new(reply_socket: SocketAddrV4, client_port: u16, uuid: u64) -> CData {
+    #[inline]
+    pub fn new(reply_socket: &SocketAddrV4, client_port: u16, uuid: u64) -> CData {
         CData {
-            reply_socket,
+            reply_socket: *reply_socket,
             client_port,
             uuid,
         }
@@ -226,8 +223,8 @@ impl CData {
 }
 
 #[inline]
-pub fn tcp_payload_size<M: Sized + Send>(p: &Packet<TcpHeader, M>) -> usize {
-    let iph = p.get_pre_header().unwrap();
+pub fn tcp_payload_size(p: &Pdu) -> usize {
+    let iph = p.headers().ip(1);
     // payload size = ip total length - ip header length -tcp header length
-    iph.length() as usize - (iph.ihl() as usize) * 4 - (p.get_header().data_offset() as usize) * 4
+    iph.length() as usize - (iph.ihl() as usize) * 4 - (p.headers().tcp(2).data_offset() as usize) * 4
 }

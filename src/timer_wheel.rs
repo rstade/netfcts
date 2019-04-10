@@ -46,15 +46,16 @@ where
         }
     }
 
+    #[inline]
     pub fn resolution(&self) -> u64 {
         self.resolution_cycles
     }
 
+    #[inline]
     pub fn get_max_timeout_cycles(&self) -> u64 {
         (self.no_slots as u64 - 1) * self.resolution_cycles as u64
     }
 
-    #[inline]
     pub fn tick(&mut self, now: &u64) -> (Option<Drain<T>>, bool) {
         if self.start != 0 {
             // only when the wheel has been started
@@ -87,7 +88,6 @@ where
     }
 
     /// schedules a new element and returns the slot and the index in the wheel
-    #[inline]
     pub fn schedule(&mut self, after_cycles: &u64, what: T) -> (u16, u16)
     where
         T: Debug,
@@ -100,23 +100,29 @@ where
         let dur = *after_cycles + now - self.start;
         let slots = dur / self.resolution_cycles - 1;
         let slot = slots.wrapping_rem(self.no_slots as u64);
-        debug!("scheduling port {:?} at {:?} in slot {}", what, self.slots[slot as usize].len(), slot);
+        debug!(
+            "scheduling port {:?} at {:?} in slot {}",
+            what,
+            self.slots[slot as usize].len(),
+            slot
+        );
         self.slots[slot as usize].push(what);
-        (slot as u16, (self.slots[slot as usize].len()-1) as u16)
+        (slot as u16, (self.slots[slot as usize].len() - 1) as u16)
     }
 
     // we use replace to remove elements from the wheel by overwriting them with an invalid value
     #[inline]
     pub fn replace(&mut self, slot_and_index: (u16, u16), new_element: T) -> Option<T> {
-        let slot= slot_and_index.0 as usize;
+        let slot = slot_and_index.0 as usize;
         let index = slot_and_index.1 as usize;
         debug!("replace: slot = {}, index = {}", slot, index);
         if index < self.slots[slot].len() {
-            let old=self.slots[slot][index].clone();
-            self.slots[slot][index]=new_element;
+            let old = self.slots[slot][index].clone();
+            self.slots[slot][index] = new_element;
             Some(old)
+        } else {
+            None
         }
-        else { None }
     }
 }
 
@@ -131,7 +137,7 @@ mod tests {
     #[test]
     fn event_timing() {
         let system_data = SystemData::detect();
-        let milli_to_cycles: u64 = system_data.cpu_clock/1000;
+        let milli_to_cycles: u64 = system_data.cpu_clock / 1000;
 
         let start = utils::rdtsc_unsafe();
         println!("start = {:?}", start);
@@ -189,8 +195,7 @@ mod tests {
     #[test]
     fn replace_element_in_timer_wheel() {
         let system_data = SystemData::detect();
-        let milli_to_cycles: u64 = system_data.cpu_clock/1000;
-
+        let milli_to_cycles: u64 = system_data.cpu_clock / 1000;
 
         let mut wheel: TimerWheel<u16> = TimerWheel::new(128, 16 * milli_to_cycles, 128);
         // populate
@@ -200,7 +205,7 @@ mod tests {
             //println!("n_millis= {}, slot = {}", n_millis, _slot);
         }
         // add the test element
-        let n_millis=100;
+        let n_millis = 100;
         let slot_and_index = wheel.schedule(&((n_millis as u64) * milli_to_cycles), n_millis);
         let old = wheel.replace(slot_and_index, 101);
         assert_eq!(old.unwrap(), n_millis);

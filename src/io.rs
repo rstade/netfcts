@@ -90,7 +90,7 @@ pub fn print_rx_tx_counters(pipeline_id: &PipelineId, rx_tx_stats: &Vec<(u64, us
             .for_each(|(i, (&prev, &next))| {
                 println!(
                     "{:4}: {:>24} -{:>24} -{:8} {:8}",
-                    i+1,
+                    i + 1,
                     next.0.separated_string(),
                     (next.0 - prev.0).separated_string(),
                     (next.1 - prev.1),

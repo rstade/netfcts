@@ -44,10 +44,10 @@ impl TimeAdder {
                 self.count,
                 self.sum / self.count
             );
-            self.sum=0;
+            self.sum = 0;
         }
 
-        if self.count > self.warm_up && (self.count-self.warm_up) % self.sample_size == 0 {
+        if self.count > self.warm_up && (self.count - self.warm_up) % self.sample_size == 0 {
             println!(
                 "TimeAdder {:24}: sum = {:12}, count= {:9}, per count= {:6}",
                 self.name,
@@ -93,10 +93,11 @@ const CHUNK_SIZE: usize = 1usize << CHUNK_BITS;
 const ROOT_SIZE: usize = 1usize << (16 - CHUNK_BITS);
 const HEAP_SIZE: usize = 0x1000;
 
-
 #[derive(Clone, Copy)]
 struct Chunk<T>
-    where T: Copy {
+where
+    T: Copy,
+{
     chunk: [T; CHUNK_SIZE],
     used_slots: usize,
     allocated: bool,
@@ -120,7 +121,9 @@ impl<T: Copy + PartialEq> Chunk<T> {
             self.chunk[ix] = self.empty;
             self.used_slots -= 1;
             Some(old)
-        } else { None }
+        } else {
+            None
+        }
     }
     #[inline]
     fn insert(&mut self, ix: usize, item: T) -> Option<T> {
@@ -136,11 +139,12 @@ impl<T: Copy + PartialEq> Chunk<T> {
 }
 
 struct ChunkHeap<T>
-    where T: Copy + PartialEq {
+where
+    T: Copy + PartialEq,
+{
     heap: Vec<Chunk<T>>,
     free_chunks: VecDeque<usize>,
 }
-
 
 impl<T: Copy + PartialEq> ChunkHeap<T> {
     fn new(init: T) -> ChunkHeap<T> {
@@ -151,9 +155,13 @@ impl<T: Copy + PartialEq> ChunkHeap<T> {
     }
     // index i must be > 0, as we use 0 for indicating unused slots
     #[inline]
-    fn get(&self, i: usize) -> &Chunk<T> { &self.heap[i - 1] }
+    fn get(&self, i: usize) -> &Chunk<T> {
+        &self.heap[i - 1]
+    }
     #[inline]
-    fn get_mut(&mut self, i: usize) -> &mut Chunk<T> { &mut self.heap[i - 1] }
+    fn get_mut(&mut self, i: usize) -> &mut Chunk<T> {
+        &mut self.heap[i - 1]
+    }
     #[inline]
     fn allocate(&mut self) -> Option<usize> {
         let ix = self.free_chunks.pop_front();
@@ -163,9 +171,11 @@ impl<T: Copy + PartialEq> ChunkHeap<T> {
         ix
     }
     fn values(&self, filter: fn(&&T) -> bool) -> Vec<T> {
-        self.heap.iter().filter(|chunk| { (*chunk).allocated }).flat_map(
-            |chunk| { chunk.chunk.iter().filter(filter).map(|item| *item) }
-        ).collect()
+        self.heap
+            .iter()
+            .filter(|chunk| (*chunk).allocated)
+            .flat_map(|chunk| chunk.chunk.iter().filter(filter).map(|item| *item))
+            .collect()
     }
 }
 
@@ -190,7 +200,9 @@ impl PortMap {
     #[inline]
     fn get<'a, T: Copy + PartialEq>(&self, chunk_heap: &'a ChunkHeap<T>, port: u16) -> Option<&'a T> {
         let high_p = port.shr(CHUNK_BITS as u16) as usize;
-        if self.root[high_p] == 0 { return None; } else {
+        if self.root[high_p] == 0 {
+            return None;
+        } else {
             let low_p = port.bitand(CHUNK_SIZE as u16 - 1) as usize;
             Some(&chunk_heap.get(self.root[high_p] as usize).chunk[low_p])
         }
@@ -198,14 +210,15 @@ impl PortMap {
     #[inline]
     fn remove<T: Copy + PartialEq>(&mut self, chunk_heap: &mut ChunkHeap<T>, port: u16) -> Option<T> {
         let high_p = port.shr(CHUNK_BITS as u16) as usize;
-        if self.root[high_p] == 0 { return None; } else {
+        if self.root[high_p] == 0 {
+            return None;
+        } else {
             let low_p = port.bitand(CHUNK_SIZE as u16 - 1) as usize;
             let chunk = chunk_heap.get_mut(self.root[high_p] as usize);
             chunk.remove(low_p)
         }
     }
 }
-
 
 pub struct Sock2Index {
     chunk_heap: ChunkHeap<u16>,
@@ -232,7 +245,7 @@ impl<'a> Sock2Index {
                 None => None,
                 Some(0) => None,
                 r => r,
-            }
+            },
         }
     }
 
@@ -342,7 +355,6 @@ impl<'a> Sock2IndexOld {
     }
 }
 
-
 #[test]
 fn test_shuffling() {
     let vec = shuffle_ports(0, 100);
@@ -374,13 +386,16 @@ fn test_chunk_heap() {
         let val = port_map.get(&mut chunk_heap, 0xFFFF).unwrap();
         assert_eq!(*val, item + 2);
     }
-    {// test for non-existent key
+    {
+        // test for non-existent key
         let val = port_map.get(&mut chunk_heap, 0x1).unwrap();
         assert_eq!(*val, 0);
     }
     let mut values = chunk_heap.values(|ix| **ix != 0);
     values.sort_by(|a, b| a.cmp(b));
-    for i in 0..3 { assert_eq!(values[i], item + i as u16); }
+    for i in 0..3 {
+        assert_eq!(values[i], item + i as u16);
+    }
 }
 
 #[test]

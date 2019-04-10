@@ -1,7 +1,6 @@
-use e2d2::common::EmptyMetadata;
 use e2d2::headers::{IpHeader, MacHeader, TcpHeader};
 use e2d2::interface::PmdPort;
-use e2d2::interface::{new_packet, Packet};
+use e2d2::interface::Pdu;
 use e2d2::native::zcsi::rte_kni_handle_request;
 use e2d2::native::zcsi::{mbuf_alloc_bulk, MBuf};
 use e2d2::queues::MpscProducer;
@@ -50,8 +49,8 @@ impl Executable for KniHandleRequest {
     }
 }
 
-pub struct PacketInjector {
-    packet_prototype: Packet<TcpHeader, EmptyMetadata>,
+pub struct PacketInjector<'a> {
+    packet_prototype: Pdu<'a>,
     producer: MpscProducer,
     no_packets: usize,
     sent_packets: usize,
@@ -77,7 +76,7 @@ pub fn private_etype(etype: &u16) -> bool {
     return *etype == PRIVATE_ETYPE_PACKET || *etype == PRIVATE_ETYPE_TIMER;
 }
 
-impl PacketInjector {
+impl<'a> PacketInjector<'a> {
     // by setting no_packets=0 batch creation is unlimited
     pub fn new(
         producer: MpscProducer,
@@ -85,7 +84,7 @@ impl PacketInjector {
         no_packets: usize,
         min_inter_batch_gap: u64,
         dst_port: u16,
-    ) -> PacketInjector {
+    ) -> PacketInjector<'a> {
         let mut mac = MacHeader::new();
         mac.src = hd_src_data.mac.clone();
         mac.set_etype(PRIVATE_ETYPE_PACKET); // mark this through an unused ethertype as an internal frame, will be re-written later in the pipeline
@@ -102,14 +101,10 @@ impl PacketInjector {
         tcp.set_src_port(hd_src_data.port);
         tcp.set_dst_port(dst_port);
         tcp.set_data_offset(5);
-        let packet_prototype = new_packet()
-            .unwrap()
-            .push_header(&mac)
-            .unwrap()
-            .push_header(&ip)
-            .unwrap()
-            .push_header(&tcp)
-            .unwrap();
+        let mut packet_prototype = Pdu::new_pdu().unwrap();
+        packet_prototype.push_header(&mac);
+        packet_prototype.push_header(&ip);
+        packet_prototype.push_header(&tcp);
 
         PacketInjector {
             packet_prototype,
@@ -123,19 +118,19 @@ impl PacketInjector {
         }
     }
 
-    pub fn set_start_delay(mut self, delay: u64) -> PacketInjector {
+    pub fn set_start_delay(mut self, delay: u64) -> PacketInjector<'a> {
         self.start_delay = delay;
         self
     }
 
     #[inline]
-    pub fn create_packet_from_mbuf(&mut self, mbuf: *mut MBuf) -> Packet<TcpHeader, EmptyMetadata> {
+    pub fn create_packet_from_mbuf(&mut self, mbuf: *mut MBuf) -> Pdu {
         let p = unsafe { self.packet_prototype.copy_use_mbuf(mbuf) };
         p
     }
 }
 
-impl Executable for PacketInjector {
+impl<'a> Executable for PacketInjector<'a> {
     fn execute(&mut self) -> (u32, i32) {
         let now = utils::rdtsc_unsafe();
         if self.start_time == 0 {
@@ -164,8 +159,8 @@ impl Executable for PacketInjector {
     }
 }
 
-pub struct TickGenerator {
-    packet_prototype: Packet<TcpHeader, EmptyMetadata>,
+pub struct TickGenerator<'a> {
+    packet_prototype: Pdu<'a>,
     producer: MpscProducer,
     last_tick: u64,
     tick_length: u64,
@@ -174,12 +169,12 @@ pub struct TickGenerator {
 }
 
 #[allow(dead_code)]
-impl TickGenerator {
+impl<'a> TickGenerator<'a> {
     pub fn new(
         producer: MpscProducer,
         hd_src_data: &L234Data,
         tick_length: u64, // in cycles
-    ) -> TickGenerator {
+    ) -> TickGenerator<'a> {
         let mut mac = MacHeader::new();
         mac.src = hd_src_data.mac.clone();
         mac.set_etype(PRIVATE_ETYPE_TIMER); // mark this through an unused ethertype as an internal frame, will be re-written later in the pipeline
@@ -195,14 +190,10 @@ impl TickGenerator {
         tcp.set_syn_flag();
         tcp.set_src_port(hd_src_data.port);
         tcp.set_data_offset(5);
-        let mut packet_prototype = new_packet()
-            .unwrap()
-            .push_header(&mac)
-            .unwrap()
-            .push_header(&ip)
-            .unwrap()
-            .push_header(&tcp)
-            .unwrap();
+        let mut packet_prototype = Pdu::new_pdu().unwrap();
+        packet_prototype.push_header(&mac);
+        packet_prototype.push_header(&ip);
+        packet_prototype.push_header(&tcp);
         packet_prototype.add_to_payload_tail(64).unwrap();
         TickGenerator {
             packet_prototype,
@@ -224,7 +215,7 @@ impl TickGenerator {
     }
 }
 
-impl Executable for TickGenerator {
+impl<'a> Executable for TickGenerator<'a> {
     fn execute(&mut self) -> (u32, i32) {
         let p;
         let now = utils::rdtsc_unsafe();
