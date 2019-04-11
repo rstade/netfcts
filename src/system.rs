@@ -1,8 +1,7 @@
 use std::fs::File;
 use std::io::Read;
-use eui48::MacAddress;
+use eui48::{MacAddress, ParseError};
 use std::path::Path;
-use errors::*;
 
 const CPU_CLOCK_PATH: &str = "/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq";
 
@@ -24,22 +23,21 @@ impl SystemData {
     }
 }
 
-pub fn get_mac_from_ifname(ifname: &str) -> Result<MacAddress> {
+pub fn get_mac_from_ifname(ifname: &str) -> Result<MacAddress, ParseError> {
     let iface = Path::new("/sys/class/net").join(ifname).join("address");
     let mut macaddr = String::new();
-    File::open(iface).map_err(|e| e.into()).and_then(|mut f| {
+    File::open(iface).and_then(|mut f| {
         f.read_to_string(&mut macaddr)
-            .map_err(|e| e.into())
-            .and_then(|_| MacAddress::parse_str(&macaddr.lines().next().unwrap_or("")).map_err(|e| e.into()))
-    })
+    }).unwrap();
+    MacAddress::parse_str(&macaddr.lines().next().unwrap_or(""))
 }
 
-pub fn get_mac_string_from_ifname(ifname: &str) -> Result<String> {
+pub fn get_mac_string_from_ifname(ifname: &str) -> Result<String, ParseError> {
     let iface = Path::new("/sys/class/net").join(ifname).join("address");
     let mut macaddr = String::new();
-    File::open(iface).map_err(|e| e.into()).and_then(|mut f| {
+    File::open(iface).and_then(|mut f| {
         f.read_to_string(&mut macaddr)
             .map_err(|e| e.into())
-            .and_then(|_| Ok(macaddr.lines().next().unwrap_or("").to_string()))
-    })
+    }).unwrap();
+    Ok(macaddr.lines().next().unwrap_or("").to_string())
 }

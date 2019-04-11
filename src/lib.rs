@@ -7,8 +7,6 @@ extern crate serde_derive;
 extern crate log;
 extern crate ipnet;
 extern crate separator;
-#[macro_use]
-extern crate error_chain;
 extern crate toml;
 extern crate rand;
 
@@ -18,7 +16,6 @@ pub mod tcp_common;
 pub mod timer_wheel;
 pub mod system;
 pub mod io;
-pub mod errors;
 pub mod utils;
 mod recstore;
 
