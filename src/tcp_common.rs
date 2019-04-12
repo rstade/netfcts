@@ -213,9 +213,9 @@ pub struct CData {
 
 impl CData {
     #[inline]
-    pub fn new(reply_socket: &SocketAddrV4, client_port: u16, uuid: u64) -> CData {
+    pub fn new(reply_socket: SocketAddrV4, client_port: u16, uuid: u64) -> CData {
         CData {
-            reply_socket: *reply_socket,
+            reply_socket: reply_socket,
             client_port,
             uuid,
         }
