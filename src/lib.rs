@@ -38,14 +38,17 @@ use separator::Separatable;
 use eui48::MacAddress;
 
 use e2d2::allocators::CacheAligned;
-use e2d2::interface::{FlowDirector, PmdPort, PortQueue, PortQueueTxBuffered, PortType, Pdu, update_tcp_checksum_};
-use e2d2::scheduler::NetBricksContext;
+use e2d2::interface::{
+    FlowDirector, FlowSteeringMode, PmdPort, PortQueue, PortQueueTxBuffered, PortType, Pdu, update_tcp_checksum_
+};
 use e2d2::utils as e2d2_utils;
 use e2d2::native::zcsi::ipv4_phdr_chksum;
 use e2d2::headers::{EndOffset, IpHeader, MacHeader, TcpHeader};
+use e2d2::native::zcsi::fdir_get_infos;
 
 use tcp_common::{ReleaseCause, TcpRole, TcpState, L234Data, tcp_payload_size};
 use tcp_common::tcp_start_state;
+use e2d2::scheduler::NetBricksContext;
 
 #[derive(Clone, Copy, Debug)]
 //#[repr(align(64))]
@@ -316,26 +319,79 @@ impl Storable for ConRecord {
     }
 }
 
+pub fn setup_kernel_interfaces(context: &NetBricksContext) {
+    // set up kni: this requires the executable KniHandleRequest to run (serving rte_kni_handle_request)
+    debug!("Number of PMD ports: {}", PmdPort::num_pmd_ports());
+    for port in context.ports.values() {
+        debug!(
+            "port {}:{} -- mac_address= {}",
+            port.port_type(),
+            port.port_id(),
+            port.mac_address()
+        );
+        if port.is_native_kni() || port.is_virtio() {
+            let associated_dpdk_port_id = port.associated_dpdk_port_id();
+            let associated_port = if associated_dpdk_port_id.is_some() {
+                context.id_to_port.get(&associated_dpdk_port_id.unwrap())
+            } else {
+                None
+            };
+            let net_spec = port.net_spec().as_ref().unwrap().clone();
+            let ip_address_count = if associated_port.is_none() {
+                1
+            } else {
+                if associated_port
+                    .unwrap()
+                    .flow_steering_mode()
+                    .unwrap_or(FlowSteeringMode::Port)
+                    == FlowSteeringMode::Ip
+                {
+                    // in addition to the primary address of the engine, we use for each core an additional IP address
+                    associated_port.unwrap().rx_cores.as_ref().unwrap().len() + 1
+                } else {
+                    1
+                }
+            };
+            // kni interfaces w/o associated port are unusable
+            if port.is_virtio() || associated_port.is_some() {
+                setup_linux_if(
+                    port.linux_if().unwrap(),
+                    &net_spec.ip_net.unwrap(),
+                    &net_spec.mac.unwrap(),
+                    &net_spec.nsname.unwrap(),
+                    ip_address_count,
+                )
+            };
+        }
+    }
+}
+
 #[inline]
 pub fn is_kni_core(pci: &CacheAligned<PortQueue>) -> bool {
     pci.rxq() == 0
 }
 
-pub fn setup_kni(kni_name: &str, ip_net: &Ipv4Net, mac_address: &String, kni_netns: &String, ip_address_count: usize) {
+pub fn setup_linux_if(
+    kni_name: &str,
+    ip_net: &Ipv4Net,
+    mac_address: &MacAddress,
+    kni_netns: &String,
+    ip_address_count: usize,
+) {
     let ip_addr_first = ip_net.addr();
     let prefix_len = ip_net.prefix_len();
 
     debug!("setup_kni");
     //# ip link set dev vEth1 address XX:XX:XX:XX:XX:XX
     let output = Command::new("ip")
-        .args(&["link", "set", "dev", kni_name, "address", mac_address])
+        .args(&["link", "set", "dev", kni_name, "address", &mac_address.to_hex_string()])
         .output()
         .expect("failed to assign MAC address to kni i/f");
     let reply = output.stderr;
 
     debug!(
         "assigning MAC addr {} to {}: {}, {}",
-        mac_address,
+        &mac_address.to_hex_string(),
         kni_name,
         output.status,
         String::from_utf8_lossy(&reply)
@@ -409,94 +465,79 @@ pub fn setup_kni(kni_name: &str, ip_net: &Ipv4Net, mac_address: &String, kni_net
     info!("show IP addr: {}\n {}", output.status, String::from_utf8_lossy(&reply2));
 }
 
-pub fn new_port_queues_for_core(
-    core: i32,
-    pmd_ports: &HashMap<String, Arc<PmdPort>>,
-) -> (CacheAligned<PortQueueTxBuffered>, CacheAligned<PortQueue>) {
-    let mut kni: Option<CacheAligned<PortQueue>> = None;
-    let mut pci: Option<CacheAligned<PortQueueTxBuffered>> = None;
-    // maps port_id to kni device and core for the kni master
-    let mut kni_ports: HashMap<u16, &Arc<PmdPort>> = HashMap::new();
-
-    for (name, pmd_port) in pmd_ports {
-        if pmd_port.is_kni() {
-            let before = kni_ports.insert(pmd_port.port_id(), pmd_port);
-            if before.is_some() {
-                error!("duplicate KNI port in configuration, port_id= {}", pmd_port.port_id())
-            }
-        }
-        for (xq, c) in pmd_port.rx_cores.as_ref().expect("rx_cores not set").iter().enumerate() {
-            if *c == core {
-                // found our core
-                // currently the pipeline must run the rx and tx queues with the same index
-                assert_eq!(pmd_port.tx_cores.as_ref().expect("tx cores not set")[xq], core);
-
-                if pmd_port.is_kni() {
-                    let port = PmdPort::new_queue_pair(pmd_port, xq as u16, xq as u16)
-                        .expect(&format!("Queue {} on port {} could not be initialized", xq, name));
-                    debug!(
-                        "setup_pipeline on core {} for kni port {} --  {} rxq {} txq {}",
-                        core,
-                        name,
-                        pmd_port.mac_address(),
-                        port.rxq(),
-                        port.txq(),
-                    );
-                    if kni.is_some() {
-                        panic!(
-                            "currently not more than one kni device can be handled per core, core = {}",
-                            core
-                        );
-                    }
-                    kni = Some(port);
-                } else {
-                    let port = PmdPort::new_tx_buffered_queue_pair(pmd_port, xq as u16, xq as u16)
-                        .expect(&format!("Queue {} on port {} could not be initialized", xq, name));
-                    debug!(
-                        "setup_pipeline on core {} for dpdk port {} --  {} rxq {} txq {}",
-                        core,
-                        name,
-                        pmd_port.mac_address(),
-                        port.port_queue.rxq(),
-                        port.port_queue.txq(),
-                    );
-                    if pci.is_some() {
-                        panic!(
-                            "currently not more than one dpdk port can be handled per core, core = {}",
-                            core
-                        );
-                    }
-                    pci = Some(port);
-                }
-            }
-        }
-    }
-
-    if pci.is_none() {
-        panic!("no pci port found for pipeline on core {}", core);
-    }
-
-    if kni.is_none() {
-        let pmd_kni = kni_ports.get(&pci.as_ref().unwrap().port_queue.port_id());
-        if pmd_kni.is_none() {
-            error!(
-                "missing kni device for dpdk port with port-id {}",
-                pci.as_ref().unwrap().port_queue.port_id()
-            )
-        }
-        kni = Some(PmdPort::new_queue_pair(pmd_kni.unwrap(), 0, 0).expect(&format!(
-            "KNI port with port_id {} could not be initialized",
-            pmd_kni.unwrap().port_id()
-        )));
-    }
-    (pci.unwrap(), kni.unwrap())
+pub fn physical_ports_for_core(core: i32, pmd_ports: &HashMap<String, Arc<PmdPort>>) -> Vec<&Arc<PmdPort>> {
+    pmd_ports
+        .iter()
+        .map(|(_, p)| p)
+        .filter(|pmd_port| {
+            *pmd_port.port_type() == PortType::Physical
+                && pmd_port.rx_cores.as_ref().expect("rx_cores not set").contains(&core)
+        })
+        .collect()
 }
 
-#[derive(Deserialize, Clone, Copy, PartialEq)]
-pub enum FlowSteeringMode {
-    // Port is default
-    Port,
-    Ip,
+pub fn new_port_queues_for_core(
+    core: i32,
+    pmd_port: &Arc<PmdPort>,
+    associated_kni_port: Option<&Arc<PmdPort>>,
+) -> (Option<CacheAligned<PortQueueTxBuffered>>, Option<CacheAligned<PortQueue>>) {
+    let mut kni: Option<CacheAligned<PortQueue>>;
+    let mut pci: Option<CacheAligned<PortQueueTxBuffered>>;
+
+    let queue = pmd_port
+        .rx_cores
+        .as_ref()
+        .expect("rx_cores not set")
+        .iter()
+        .position(|c| *c == core)
+        .unwrap();
+    // found queue for core
+    // currently the pipeline must run the rx and tx queues with the same index
+    assert_eq!(pmd_port.tx_cores.as_ref().expect("tx cores not set")[queue], core);
+
+    let port = PmdPort::new_tx_buffered_queue_pair(pmd_port, queue as u16, queue as u16).expect(&format!(
+        "Queue {} on port {} could not be initialized",
+        queue,
+        pmd_port.name()
+    ));
+    debug!(
+        "setup_pipeline on core {} for dpdk port {} --  {} rxq {} txq {}",
+        core,
+        pmd_port.name(),
+        pmd_port.mac_address(),
+        port.port_queue.rxq(),
+        port.port_queue.txq(),
+    );
+
+    if associated_kni_port.is_some() {
+        let kni_port = associated_kni_port.unwrap();
+        if !(kni_port.is_native_kni() || kni_port.is_virtio()) {
+            panic!(
+                "associated kernel network interface {} must be either of type Kni or type Virtio",
+                kni_port.name()
+            );
+        }
+        let port = PmdPort::new_queue_pair(kni_port, queue as u16, queue as u16).expect(&format!(
+            "Queue {} on port {} could not be initialized",
+            queue,
+            kni_port.name()
+        ));
+        debug!(
+            "setup_pipeline on core {} for kni port {} --  {} rxq {} txq {}",
+            core,
+            kni_port.name(),
+            kni_port.mac_address(),
+            port.rxq(),
+            port.txq(),
+        );
+        kni = Some(port);
+    } else {
+        kni = None;
+    }
+
+    pci = Some(port);
+
+    (pci, kni)
 }
 
 #[inline]
@@ -505,59 +546,76 @@ fn get_tcp_port_base(port: &PmdPort, count: u16) -> u16 {
     port_mask - count * (!port_mask + 1)
 }
 
-pub fn initialize_flowdirector(
-    context: &NetBricksContext,
-    steering_mode: FlowSteeringMode,
-    ipnet: &Ipv4Net,
-) -> HashMap<u16, Arc<FlowDirector>> {
-    let mut fdir_map: HashMap<u16, Arc<FlowDirector>> = HashMap::new();
-    for port in context.ports.values() {
-        if *port.port_type() == PortType::Dpdk {
-            // initialize flow director on port, cannot do this in parallel from multiple threads
-            let mut flowdir = FlowDirector::new(port.clone());
-            let ip_addr_first = ipnet.addr();
-            for (i, core) in context.active_cores.iter().enumerate() {
-                match context.rx_queues.get(&core) {
-                    // retrieve all rx queues for this core
-                    Some(set) => match set.iter().last() {
-                        // select one (should be the only one)
-                        Some(queue) => match steering_mode {
-                            FlowSteeringMode::Ip => {
-                                let dst_ip = u32::from(ip_addr_first) + i as u32 + 1;
-                                let dst_port = port.get_tcp_dst_port_mask();
-                                debug!(
-                                    "set fdir filter on port {} for rfs mode IP: queue= {}, ip= {}, port base = {}",
-                                    port.port_id(),
-                                    queue.rxq(),
-                                    Ipv4Addr::from(dst_ip),
-                                    dst_port,
-                                );
-                                flowdir.add_fdir_filter(queue.rxq(), dst_ip, dst_port).unwrap();
-                            }
-                            FlowSteeringMode::Port => {
-                                let dst_ip = u32::from(ip_addr_first);
-                                let dst_port = get_tcp_port_base(port, i as u16);
-                                debug!(
-                                    "set fdir filter on port {} for rfs mode Port: queue= {}, ip= {}, port base = {}",
-                                    port.port_id(),
-                                    queue.rxq(),
-                                    Ipv4Addr::from(dst_ip),
-                                    dst_port,
-                                );
-                                flowdir.add_fdir_filter(queue.rxq(), dst_ip, dst_port).unwrap();
-                            }
-                        },
-                        None => (),
-                    },
-                    None => (),
+pub fn initialize_flowdirector(port: &Arc<PmdPort>, kni: &Arc<PmdPort>) -> Option<FlowDirector> {
+    info!("initialize flowdirector for port {} with kni = {}", port.name(), kni.name());
+    if *port.port_type() == PortType::Physical && port.flow_steering_mode().is_some() {
+        // initialize flow director on port, cannot do this in parallel from multiple threads
+        let steering_mode = port.flow_steering_mode().clone().unwrap();
+        let mut flowdir = FlowDirector::new(port.clone());
+        assert!(kni.net_spec().is_some());
+        let ip_addr_first = kni.net_spec().as_ref().unwrap().ip_net.as_ref().unwrap().addr();
+        for (i, _core) in port.rx_cores.as_ref().unwrap().iter().enumerate() {
+            match steering_mode {
+                FlowSteeringMode::Ip => {
+                    let dst_ip = u32::from(ip_addr_first) + i as u32 + 1;
+                    let dst_port = port.get_tcp_dst_port_mask();
+                    debug!(
+                        "set fdir filter on port {} for rfs mode IP: queue= {}, ip= {}, port base = {}",
+                        port.port_id(),
+                        i,
+                        Ipv4Addr::from(dst_ip),
+                        dst_port,
+                    );
+                    flowdir.add_fdir_filter(i as u16, dst_ip, dst_port).unwrap();
+                }
+                FlowSteeringMode::Port => {
+                    let dst_ip = u32::from(ip_addr_first);
+                    let dst_port = get_tcp_port_base(port, i as u16);
+                    debug!(
+                        "set fdir filter on port {} for rfs mode Port: queue= {}, ip= {}, port base = {}",
+                        port.port_id(),
+                        i,
+                        Ipv4Addr::from(dst_ip),
+                        dst_port,
+                    );
+                    flowdir.add_fdir_filter(i as u16, dst_ip, dst_port).unwrap();
                 }
             }
-            fdir_map.insert(port.port_id(), Arc::new(flowdir));
         }
+        Some(flowdir)
+    } else {
+        error!("need a physical port with defined flow steering mode for flowdirector");
+        None
     }
-    fdir_map
 }
 
+pub fn setup_flowdirector_map(context: &NetBricksContext) -> HashMap<u16, Arc<FlowDirector>> {
+    let mut flowdirector_map: HashMap<u16, Arc<FlowDirector>> = HashMap::new();
+    for port in context
+        .ports
+        .values()
+        .filter(|p| p.is_physical() && p.flow_steering_mode().is_some())
+    {
+        if port.kni_name().is_some() {
+            let opt_kni = context.ports.get(*port.kni_name().as_ref().unwrap());
+            if opt_kni.is_some() {
+                let kni = opt_kni.unwrap();
+                let flow_dir = initialize_flowdirector(port, kni);
+                if flow_dir.is_some() {
+                    flowdirector_map.insert(port.port_id(), Arc::new(flow_dir.unwrap()));
+                    unsafe {
+                        fdir_get_infos(port.port_id());
+                    }
+                }
+            } else {
+                error!("kni {} for port {} not found", port.kni_name().as_ref().unwrap(), port.name());
+            }
+        } else {
+            error!("port {} has no kni interface assigned", port.name());
+        }
+    }
+    flowdirector_map
+}
 
 #[inline]
 pub fn do_ttl(p: &mut Pdu) {
@@ -569,7 +627,6 @@ pub fn do_ttl(p: &mut Pdu) {
     ip.update_checksum();
 }
 
-
 #[inline]
 pub fn prepare_checksum_and_ttl(p: &mut Pdu) {
     //often the mbuf still contains rx offload flags if we received it from the NIC, this may fail the tx offload logic
@@ -577,7 +634,7 @@ pub fn prepare_checksum_and_ttl(p: &mut Pdu) {
 
     if p.tcp_checksum_tx_offload() {
         {
-            let stack=p.headers_mut();
+            let stack = p.headers_mut();
             let csum;
             {
                 let ip = stack.ip_mut(1);
@@ -604,7 +661,7 @@ pub fn prepare_checksum_and_ttl(p: &mut Pdu) {
             p.validate_tx_offload()
         );
     } else {
-        let stack=p.headers_mut();
+        let stack = p.headers_mut();
         let psz;
         let src;
         let dst;
@@ -620,11 +677,7 @@ pub fn prepare_checksum_and_ttl(p: &mut Pdu) {
             dst = ip.dst();
         }
         update_tcp_checksum_(stack.tcp_mut(2), psz, src, dst);
-        debug!(
-            "ip-payload_sz= {}, checksum recalc = {:X}",
-            psz,
-            stack.tcp_mut(2).checksum()
-        );
+        debug!("ip-payload_sz= {}, checksum recalc = {:X}", psz, stack.tcp_mut(2).checksum());
     }
 }
 
@@ -668,11 +721,10 @@ pub fn remove_tcp_options(p: &mut Pdu) {
     }
 }
 
-
 #[inline]
 pub fn make_reply_packet(p: &mut Pdu, inc: u32) {
     let payload_sz = tcp_payload_size(p);
-    let stack=p.headers_mut();
+    let stack = p.headers_mut();
     {
         let mac = stack.mac_mut(0);
         let smac = mac.src;
@@ -681,7 +733,7 @@ pub fn make_reply_packet(p: &mut Pdu, inc: u32) {
         mac.set_dmac(&smac);
     }
     {
-        let ip=stack.ip_mut(1);
+        let ip = stack.ip_mut(1);
         let sip = ip.src();
         let dip = ip.dst();
         ip.set_dst(sip);

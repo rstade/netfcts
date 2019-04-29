@@ -26,18 +26,15 @@ impl SystemData {
 pub fn get_mac_from_ifname(ifname: &str) -> Result<MacAddress, ParseError> {
     let iface = Path::new("/sys/class/net").join(ifname).join("address");
     let mut macaddr = String::new();
-    File::open(iface).and_then(|mut f| {
-        f.read_to_string(&mut macaddr)
-    }).unwrap();
+    File::open(iface).and_then(|mut f| f.read_to_string(&mut macaddr)).unwrap();
     MacAddress::parse_str(&macaddr.lines().next().unwrap_or(""))
 }
 
 pub fn get_mac_string_from_ifname(ifname: &str) -> Result<String, ParseError> {
     let iface = Path::new("/sys/class/net").join(ifname).join("address");
     let mut macaddr = String::new();
-    File::open(iface).and_then(|mut f| {
-        f.read_to_string(&mut macaddr)
-            .map_err(|e| e.into())
-    }).unwrap();
+    File::open(iface)
+        .and_then(|mut f| f.read_to_string(&mut macaddr).map_err(|e| e.into()))
+        .unwrap();
     Ok(macaddr.lines().next().unwrap_or("").to_string())
 }

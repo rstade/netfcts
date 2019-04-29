@@ -39,7 +39,7 @@ impl Executable for KniHandleRequest {
         if now - self.last_tick >= 22700 * 1000 {
             // roughly each 10 ms
             unsafe {
-                rte_kni_handle_request(self.kni_port.get_kni());
+                rte_kni_handle_request(self.kni_port.get_rte_kni());
             };
             self.last_tick = now;
             (1, 0)

@@ -4,9 +4,11 @@ use std::fmt;
 use std::fmt::Write;
 use std::net::SocketAddrV4;
 use std::ops::{Index, IndexMut};
-use e2d2::interface::Pdu;
+use e2d2::interface::{Pdu, NetSpec };
+use e2d2::common;
 
 use eui48::MacAddress;
+use std::convert::TryFrom;
 
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
 pub enum TcpState {
@@ -195,6 +197,24 @@ pub struct L234Data {
     pub port: u16,
     pub server_id: String,
     pub index: usize,
+}
+
+impl TryFrom<NetSpec> for L234Data {
+    type Error = common::errors::ErrorKind;
+
+    fn try_from(value: NetSpec) -> Result<Self, Self::Error> {
+        if value.mac.is_none() || value.ip_net.is_none() {
+            Err(common::errors::ErrorKind::TryFromNetSpecError)
+        } else {
+            Ok(L234Data {
+                mac: value.mac.unwrap(),
+                ip: u32::from(value.ip_net.unwrap().addr()),
+                port: value.port.unwrap_or(0),
+                server_id: "".to_string(),
+                index: 0,
+            })
+        }
+    }
 }
 
 pub trait UserData: Send + Sync + 'static {
