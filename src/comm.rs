@@ -20,7 +20,7 @@ impl fmt::Display for PipelineId {
 #[derive(Debug)]
 pub enum MessageFrom<T> {
     Channel(PipelineId, Sender<MessageTo<T>>),
-    StartEngine(Sender<MessageTo<T>>),
+    StartEngine,
     Task(PipelineId, Uuid, TaskType),
     PrintPerformance(Vec<i32>), // performance of tasks on cores selected by indices
     // counter client/to side, counter server/from side, sent_packets with time_stamps

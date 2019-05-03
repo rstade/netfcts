@@ -1,6 +1,7 @@
 extern crate e2d2;
 extern crate eui48;
 extern crate uuid;
+extern crate serde;
 #[macro_use]
 extern crate serde_derive;
 #[macro_use]
@@ -17,7 +18,8 @@ pub mod timer_wheel;
 pub mod system;
 pub mod io;
 pub mod utils;
-mod recstore;
+pub mod recstore;
+pub mod conrecord;
 
 pub use recstore::RecordStore;
 pub use recstore::SimpleStore;
@@ -25,298 +27,452 @@ pub use recstore::Store64;
 pub use recstore::Storable;
 pub use recstore::ConRecordOperations;
 
-use std::collections::HashMap;
+use recstore::TEngineStore;
+use comm::{MessageFrom, MessageTo, PipelineId};
+use system::SystemData;
+use tasks::TaskType;
+use io::print_hard_statistics;
 
-use std::net::{Ipv4Addr, SocketAddrV4};
+use std::collections::{ HashMap, HashSet};
+
+use std::net::{Ipv4Addr};
 use std::process::Command;
 use std::sync::Arc;
-use std::fmt;
 use std::mem;
+use std::env;
+use std::fs::File;
+use std::io::Read;
+use std::sync::mpsc::{channel, Sender, Receiver, RecvTimeoutError};
+use std::time::Duration;
+use std::thread;
 
+use serde::de::DeserializeOwned;
 use ipnet::Ipv4Net;
-use separator::Separatable;
 use eui48::MacAddress;
+use uuid::Uuid;
+use separator::Separatable;
 
 use e2d2::allocators::CacheAligned;
 use e2d2::interface::{
     FlowDirector, FlowSteeringMode, PmdPort, PortQueue, PortQueueTxBuffered, PortType, Pdu, update_tcp_checksum_
 };
-use e2d2::utils as e2d2_utils;
-use e2d2::native::zcsi::ipv4_phdr_chksum;
+use e2d2::common::ErrorKind as E2d2ErrorKind;
+use e2d2::common::errors::Result as E2d2Result;
+use e2d2::native::zcsi::{ipv4_phdr_chksum, rte_log_set_global_level, rte_log_set_level, rte_log_get_global_level, rte_log_get_level, RteLogLevel, RteLogtype};
 use e2d2::headers::{EndOffset, IpHeader, MacHeader, TcpHeader};
 use e2d2::native::zcsi::fdir_get_infos;
+use e2d2::config::{basic_opts, read_matches, NetbricksConfiguration};
+use e2d2::native::zcsi::{RteFilterType, rte_eth_dev_filter_supported};
+use e2d2::scheduler::{NetBricksContext, initialize_system, SchedulerCommand, SchedulerReply, StandaloneScheduler};
 
 use tcp_common::{ReleaseCause, TcpRole, TcpState, L234Data, tcp_payload_size};
 use tcp_common::tcp_start_state;
-use e2d2::scheduler::NetBricksContext;
 
-#[derive(Clone, Copy, Debug)]
-//#[repr(align(64))]
-pub struct ConRecord {
-    base_stamp: u64,
-    uid: u64,
-    stamps: [u32; 6],
-    sent_payload_packets: u16,
-    recv_payload_packets: u16,
-    client_ip: u32,
-    client_port: u16,
-    port: u16,
-    state: [u8; 7],
-    state_count: u8,
-    server_index: u8,
-    release_cause: u8,
-    role: u8,
-    server_state: u8,
+
+#[derive(Deserialize, Clone)]
+struct Config<T: Sized + Clone> {
+    engine: T,
 }
 
-// we map cycle differences from u64 to u32 to minimize record size in the cache (performance)
-pub const TIME_STAMP_REDUCTION_FACTOR: u64 = 1000;
-
-pub trait HasTcpState {
-    fn push_state(&mut self, state: TcpState);
-    fn last_state(&self) -> TcpState;
-    fn states(&self) -> Vec<TcpState>;
-    fn get_last_stamp(&self) -> Option<u64>;
-    fn get_first_stamp(&self) -> Option<u64>;
-    fn deltas_to_base_stamp(&self) -> Vec<u32>;
-    fn release_cause(&self) -> ReleaseCause;
-    fn set_release_cause(&mut self, cause: ReleaseCause);
+#[derive(Clone)]
+pub struct RunConfiguration<T: Sized + Clone> {
+    pub system_data: SystemData,
+    pub netbricks_configuration: NetbricksConfiguration,
+    pub engine_configuration: T,
+    pub flowdirector_map: HashMap<u16, Arc<FlowDirector>>,
+    pub remote_sender: Sender<MessageFrom<TEngineStore>>,
+    pub local_sender: Sender<MessageTo<TEngineStore>>,
 }
 
-pub trait HasConData {
-    fn sock(&self) -> (u32, u16);
-    fn set_sock(&mut self, s: (u32, u16));
-    fn port(&self) -> u16;
-    fn set_port(&mut self, port: u16);
-    fn uid(&self) -> u64;
-    fn set_uid(&mut self, new_uid: u64);
-    fn server_index(&self) -> u8;
-    fn set_server_index(&mut self, index: u8);
-    fn sent_payload_packets(&self) -> u16;
-    fn recv_payload_packets(&self) -> u16;
-    fn inc_sent_payload_pkts(&mut self) -> u16;
-    fn inc_recv_payload_pkts(&mut self) -> u16;
-    fn server_state(&self) -> TcpState;
-    fn set_server_state(&mut self, state: TcpState);
+
+pub struct RunTime<T:Sized + Clone + Send>
+{
+    pub run_configuration: RunConfiguration<T>,
+    context: Option<NetBricksContext>,
+    /// receiver in run_time thread for messages from all the pipelines running, and usually from main thread
+    /// will be moved into the run_time thread
+    local_receiver: Option<Receiver<MessageFrom<TEngineStore>>>,
+    /// a single receiver instance for messages sent by run_time thread and pipelines, usually retrieved by main thread
+    /// see also get_main_channel()
+    remote_receiver: Option<Receiver<MessageTo<TEngineStore>>>,
 }
 
-impl ConRecord {
-    #[inline]
-    pub fn init(&mut self, role: TcpRole, port: u16, sock: Option<(u32, u16)>) {
-        self.state_count = 0;
-        self.base_stamp = 0;
-        self.sent_payload_packets = 0;
-        self.recv_payload_packets = 0;
-        self.uid = e2d2_utils::rdtsc_unsafe();
-        self.server_index = 0;
-        let s = sock.unwrap_or((0, 0));
-        self.client_ip = s.0;
-        self.client_port = s.1;
-        self.role = role as u8;
-        self.port = port;
-        self.server_state = tcp_start_state(self.role()) as u8;
+impl<T:Sized + Clone + Send> RunTime<T>
+    where T: DeserializeOwned
+{
+    fn read_config(filename: &str) -> E2d2Result<T> {
+        let mut toml_str = String::new();
+        if File::open(filename)
+            .and_then(|mut f| f.read_to_string(&mut toml_str))
+            .is_err()
+        {
+            return Err(E2d2ErrorKind::ConfigurationError(format!("Could not read file {}", filename)));
+        }
+
+        info!("toml configuration:\n {}", toml_str);
+
+        let config: T = match toml::from_str(&toml_str) {
+            Ok(value) => value,
+            Err(err) => return Err(err.into()),
+        };
+
+        Ok(config.clone())
     }
 
-    #[inline]
-    pub fn role(&self) -> TcpRole {
-        TcpRole::from(self.role)
+    fn check_system(context: NetBricksContext) -> e2d2::common::Result<NetBricksContext> {
+        let num_pmd_ports = PmdPort::num_pmd_ports();
+        for i in 0..num_pmd_ports {
+            PmdPort::print_eth_dev_info(i as u16);
+        }
+        for port in context.ports.values() {
+            if port.port_type() == &PortType::Physical {
+                debug!("Supported filters on port {}:", port.port_id());
+                for i in RteFilterType::RteEthFilterNone as i32 + 1..RteFilterType::RteEthFilterMax as i32 {
+                    let result = unsafe { rte_eth_dev_filter_supported(port.port_id() as u16, RteFilterType::from(i)) };
+                    debug!(
+                        "{:<50}: {}(rc={})",
+                        RteFilterType::from(i),
+                        if result == 0 { "supported" } else { "not supported" },
+                        result
+                    );
+                }
+            }
+        }
+        Ok(context)
     }
 
-    #[inline]
-    pub fn base_stamp(&self) -> u64 {
-        self.base_stamp
-    }
-}
 
-impl HasConData for ConRecord {
-    #[inline]
-    fn sock(&self) -> (u32, u16) {
-        (self.client_ip, self.client_port)
-    }
-
-    #[inline]
-    fn set_sock(&mut self, s: (u32, u16)) {
-        self.client_ip = s.0;
-        self.client_port = s.1;
-    }
-
-    #[inline]
-    fn port(&self) -> u16 {
-        self.port
-    }
-
-    #[inline]
-    fn set_port(&mut self, port: u16) {
-        self.port = port
-    }
-
-    #[inline]
-    fn uid(&self) -> u64 {
-        self.uid
-    }
-
-    #[inline]
-    fn set_uid(&mut self, new_uid: u64) {
-        self.uid = new_uid
-    }
-
-    #[inline]
-    fn server_index(&self) -> u8 {
-        self.server_index
-    }
-
-    #[inline]
-    fn set_server_index(&mut self, index: u8) {
-        self.server_index = index
-    }
-
-    #[inline]
-    fn sent_payload_packets(&self) -> u16 {
-        self.sent_payload_packets
-    }
-
-    #[inline]
-    fn recv_payload_packets(&self) -> u16 {
-        self.recv_payload_packets
-    }
-
-    #[inline]
-    fn inc_sent_payload_pkts(&mut self) -> u16 {
-        self.sent_payload_packets += 1;
-        self.sent_payload_packets
-    }
-
-    #[inline]
-    fn inc_recv_payload_pkts(&mut self) -> u16 {
-        self.recv_payload_packets += 1;
-        self.recv_payload_packets
-    }
-
-    #[inline]
-    fn server_state(&self) -> TcpState {
-        TcpState::from(self.server_state)
-    }
-
-    #[inline]
-    fn set_server_state(&mut self, state: TcpState) {
-        self.server_state = state as u8;
-    }
-}
-
-impl HasTcpState for ConRecord {
-    #[inline]
-    fn push_state(&mut self, state: TcpState) {
-        self.state[self.state_count as usize] = state as u8;
-        if self.state_count == 0 {
-            self.base_stamp = e2d2_utils::rdtsc_unsafe();
+    fn initialize_flowdirector(port: &Arc<PmdPort>, kni: &Arc<PmdPort>) -> Option<FlowDirector> {
+        info!("initialize flowdirector for port {} with kni = {}", port.name(), kni.name());
+        if *port.port_type() == PortType::Physical && port.flow_steering_mode().is_some() {
+            // initialize flow director on port, cannot do this in parallel from multiple threads
+            let steering_mode = port.flow_steering_mode().clone().unwrap();
+            let mut flowdir = FlowDirector::new(port.clone());
+            assert!(kni.net_spec().is_some());
+            let ip_addr_first = kni.net_spec().as_ref().unwrap().ip_net.as_ref().unwrap().addr();
+            for (i, _core) in port.rx_cores.as_ref().unwrap().iter().enumerate() {
+                match steering_mode {
+                    FlowSteeringMode::Ip => {
+                        let dst_ip = u32::from(ip_addr_first) + i as u32 + 1;
+                        let dst_port = port.get_tcp_dst_port_mask();
+                        debug!(
+                            "set fdir filter on port {} for rfs mode IP: queue= {}, ip= {}, port base = {}",
+                            port.port_id(),
+                            i,
+                            Ipv4Addr::from(dst_ip),
+                            dst_port,
+                        );
+                        flowdir.add_fdir_filter(i as u16, dst_ip, dst_port).unwrap();
+                    }
+                    FlowSteeringMode::Port => {
+                        let dst_ip = u32::from(ip_addr_first);
+                        let dst_port = get_tcp_port_base(port, i as u16);
+                        debug!(
+                            "set fdir filter on port {} for rfs mode Port: queue= {}, ip= {}, port base = {}",
+                            port.port_id(),
+                            i,
+                            Ipv4Addr::from(dst_ip),
+                            dst_port,
+                        );
+                        flowdir.add_fdir_filter(i as u16, dst_ip, dst_port).unwrap();
+                    }
+                }
+            }
+            Some(flowdir)
         } else {
-            self.stamps[self.state_count as usize - 1] =
-                ((e2d2_utils::rdtsc_unsafe() - self.base_stamp) / TIME_STAMP_REDUCTION_FACTOR) as u32;
-        }
-        self.state_count += 1;
-    }
-
-    #[inline]
-    fn last_state(&self) -> TcpState {
-        if self.state_count == 0 {
-            tcp_start_state(self.role())
-        } else {
-            TcpState::from(self.state[self.state_count as usize - 1])
-        }
-    }
-
-    #[inline]
-    fn states(&self) -> Vec<TcpState> {
-        let mut result = vec![tcp_start_state(self.role()); self.state_count as usize + 1];
-        for i in 0..self.state_count as usize {
-            result[i + 1] = TcpState::from(self.state[i]);
-        }
-        result
-    }
-
-    #[inline]
-    fn get_last_stamp(&self) -> Option<u64> {
-        match self.state_count {
-            0 => None,
-            1 => Some(self.base_stamp),
-            _ => Some(self.base_stamp + self.stamps[self.state_count as usize - 2] as u64 * TIME_STAMP_REDUCTION_FACTOR),
-        }
-    }
-
-    #[inline]
-    fn get_first_stamp(&self) -> Option<u64> {
-        if self.state_count > 0 {
-            Some(self.base_stamp)
-        } else {
+            error!("need a physical port with defined flow steering mode for flowdirector");
             None
         }
     }
 
-    fn deltas_to_base_stamp(&self) -> Vec<u32> {
-        if self.state_count >= 2 {
-            self.stamps[0..(self.state_count as usize - 1)].iter().map(|s| *s).collect()
+    pub fn init_with_toml_file(toml_file: &String) -> E2d2Result<RunTime<T>> {
+
+        env_logger::init();
+
+        let log_level_rte = if log_enabled!(log::Level::Debug) {
+            RteLogLevel::RteLogDebug
         } else {
-            vec![]
+            RteLogLevel::RteLogInfo
+        };
+        unsafe {
+            rte_log_set_global_level(log_level_rte);
+            rte_log_set_level(RteLogtype::RteLogtypePmd, log_level_rte);
+            info!("dpdk log global level: {}", rte_log_get_global_level());
+            info!("dpdk log level for PMD: {}", rte_log_get_level(RteLogtype::RteLogtypePmd));
         }
-    }
 
-    #[inline]
-    fn release_cause(&self) -> ReleaseCause {
-        ReleaseCause::from(self.release_cause)
-    }
-
-    #[inline]
-    fn set_release_cause(&mut self, cause: ReleaseCause) {
-        self.release_cause = cause as u8;
-    }
-}
-
-impl fmt::Display for ConRecord {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(
-            f,
-            "({:?}, {:21}, {:6}, {:3}, {:7}, {:7}, {:?}, {:?}, {}, {:?})",
-            self.role(),
-            if self.client_ip != 0 {
-                SocketAddrV4::new(Ipv4Addr::from(self.client_ip), self.client_port).to_string()
-            } else {
-                "none".to_string()
-            },
-            self.port(),
-            self.server_index,
-            self.sent_payload_packets,
-            self.recv_payload_packets,
-            self.states(),
-            self.release_cause(),
-            self.base_stamp.separated_string(),
-            self.deltas_to_base_stamp()
-                .iter()
-                .map(|u| u.separated_string())
-                .collect::<Vec<_>>(),
-        )
-    }
-}
-
-impl Storable for ConRecord {
-    #[inline]
-    fn new() -> ConRecord {
-        ConRecord {
-            role: TcpRole::Client as u8,
-            server_index: 0,
-            release_cause: ReleaseCause::Unknown as u8,
-            state_count: 0,
-            base_stamp: 0,
-            state: [TcpState::Closed as u8; 7],
-            stamps: [0u32; 6],
-            port: 0u16,
-            client_ip: 0,
-            client_port: 0,
-            sent_payload_packets: 0,
-            recv_payload_packets: 0,
-            uid: 0,
-            server_state: TcpState::Listen as u8,
+        fn am_root() -> bool {
+            match env::var("USER") {
+                Ok(val) => val == "root",
+                Err(_e) => false,
+            }
         }
+
+        if !am_root() {
+            error!(
+                " ... must run as root, e.g.: sudo -E env \"PATH=$PATH\" $executable, see also test.sh\n\
+             Do not run 'cargo test' as root."
+            );
+            std::process::exit(1);
+        }
+
+        let opts = basic_opts();
+        let args: Vec<String> = vec!["-f".to_string(), toml_file.clone()];
+
+        let matches = match opts.parse(&args[..]) {
+            Ok(m) => m,
+            Err(f) => panic!(f.to_string()),
+        };
+        let netbricks_configuration = read_matches(&matches, &opts);
+
+        let config: Config<T> = RunTime::read_config(&toml_file)?;
+        let engine_configuration= config.engine;
+
+
+        let (remote_sender, local_receiver) = channel::<MessageFrom<TEngineStore>>();
+        let (local_sender, remote_receiver) = channel::<MessageTo<TEngineStore>>();
+
+
+        match initialize_system(&netbricks_configuration)
+            .map_err(|e| e.into())
+            .and_then(|ctxt| RunTime::<T>::check_system(ctxt))
+            {
+                Ok(context) => {
+                    Ok(RunTime {
+                        run_configuration: RunConfiguration {
+                            system_data: SystemData::detect(),
+                            netbricks_configuration,
+                            engine_configuration,
+                            flowdirector_map: HashMap::new(),
+                            remote_sender,
+                            local_sender
+                        },
+                        context: Some(context),
+                        local_receiver: Some(local_receiver),
+                        remote_receiver: Some(remote_receiver)
+                    })
+                },
+                Err(e) => {
+                    error!("Error: {}", e);
+                    Err(e)
+                }
+            }
+
     }
+
+    pub fn init() -> E2d2Result<RunTime<T>> {
+        // read config file name from command line
+        let args: Vec<String> = env::args().collect();
+        let config_file;
+        if args.len() > 1 {
+            config_file = args[1].clone();
+        } else {
+            println!("try '{} <toml configuration file>'\n", args[0]);
+            std::process::exit(1);
+        }
+        RunTime::init_with_toml_file(&config_file)
+    }
+
+    /// this returns the communication channel to the run_time thread, only the first call returns the channel
+    pub fn get_main_channel(&mut self) -> Option<(Sender<MessageFrom<TEngineStore>>, Receiver<MessageTo<TEngineStore>>)> {
+        if self.remote_receiver.is_some() {
+            Some((self.run_configuration.remote_sender.clone(), self.remote_receiver.take().unwrap()))
+        } else { None }
+    }
+
+    fn context_mut(&mut self) -> E2d2Result<&mut NetBricksContext> {
+        if self.context.is_none() {
+            return Err(E2d2ErrorKind::RunTimeError("context consumed by spawn_recv_thread already".to_string()))
+        }
+        Ok(self.context.as_mut().unwrap())
+    }
+
+    pub fn context(&self) -> E2d2Result<&NetBricksContext> {
+        if self.context.is_none() {
+            return Err(E2d2ErrorKind::RunTimeError("context consumed by spawn_recv_thread already".to_string()))
+        }
+        Ok(self.context.as_ref().unwrap())
+    }
+
+    pub fn setup_flowdirector(&mut self) -> E2d2Result<()> {
+        if self.context.is_none() {
+            return Err(E2d2ErrorKind::RunTimeError("context consumed by spawn_recv_thread already".to_string()))
+        }
+        for port in self.context.as_ref().unwrap()
+            .ports
+            .values()
+            .filter(|p| p.is_physical() && p.flow_steering_mode().is_some())
+            {
+                if port.kni_name().is_some() {
+                    let opt_kni = self.context.as_ref().unwrap().ports.get(*port.kni_name().as_ref().unwrap());
+                    if opt_kni.is_some() {
+                        let kni = opt_kni.unwrap();
+                        let flow_dir = RunTime::<T>::initialize_flowdirector(port, kni);
+                        if flow_dir.is_some() {
+                            self.run_configuration.flowdirector_map.insert(port.port_id(), Arc::new(flow_dir.unwrap()));
+                            unsafe {
+                                fdir_get_infos(port.port_id());
+                            }
+                        }
+                    } else {
+                        error!("kni {} for port {} not found", port.kni_name().as_ref().unwrap(), port.name());
+                        return Err(E2d2ErrorKind::FailedToInitializeKni(port.name().to_string()))
+                    }
+                } else {
+                    error!("port {} has no kni interface assigned", port.name());
+                    return Err(E2d2ErrorKind::FailedToInitializeKni(port.name().to_string()))
+                }
+            }
+        Ok(())
+    }
+
+    /// starts scheduler threads on the cores, but still does not execute pipelines
+    pub fn start_schedulers(&mut self) -> E2d2Result<()> {
+        self.context_mut()?.start_schedulers();
+        Ok(())
+    }
+
+    pub fn install_pipeline_on_cores<P>(&mut self, run: Box<P>) -> E2d2Result<()>
+        where
+            P: Fn(i32, HashMap<String, Arc<PmdPort>>, &mut StandaloneScheduler) + Send + Clone + 'static,
+    {
+        self.context_mut()?.install_pipeline_on_cores(run);
+        Ok(())
+    }
+
+    pub fn add_pipeline_to_run<P>(&mut self, run: Box<P>) -> E2d2Result<()>
+        where
+            P: Fn(i32, HashSet<CacheAligned<PortQueue>>, &mut StandaloneScheduler) + Send + Clone + 'static, {
+        self.context_mut()?.add_pipeline_to_run(run);
+        Ok(())
+    }
+
+    /// start spawns_run_time_thread and consumes self.context and self.local_receiver (thread needs static lifetime)
+    pub fn start(&mut self) {
+
+        let mut context=self.context.take().unwrap();
+        let mrx= self.local_receiver.take().unwrap();
+        let reply_to_main = self.run_configuration.local_sender.clone();
+
+        let _handle = thread::spawn(move || {
+            let mut senders = HashMap::new();
+            let mut tasks: Vec<Vec<(PipelineId, Uuid)>> = Vec::with_capacity(TaskType::NoTaskTypes as usize);
+            for _t in 0..TaskType::NoTaskTypes as usize {
+                tasks.push(Vec::<(PipelineId, Uuid)>::with_capacity(16));
+            }
+
+            // start execution of pipelines, but does not change task state of pipelines (e.g. sets them into ready state)
+            // the latter happens with message StartEngine (see below)
+            context.execute_schedulers();
+
+            setup_kernel_interfaces(&context);
+
+            // communicate with schedulers:
+
+            loop {
+                match mrx.recv_timeout(Duration::from_millis(10)) {
+                    Ok(MessageFrom::StartEngine) => {
+                        debug!("starting generator tasks");
+                        for s in &context.scheduler_channels {
+                            s.1.send(SchedulerCommand::SetTaskStateAll(true)).unwrap();
+                        }
+                    }
+                    Ok(MessageFrom::Channel(pipeline_id, sender)) => {
+                        debug!("got sender from {}", pipeline_id);
+                        senders.insert(pipeline_id, sender);
+                    }
+                    Ok(MessageFrom::PrintPerformance(indices)) => {
+                        for i in &indices {
+                            context
+                                .scheduler_channels
+                                .get(i)
+                                .unwrap()
+                                .send(SchedulerCommand::GetPerformance)
+                                .unwrap();
+                        }
+                    }
+                    Ok(MessageFrom::Exit) => {
+                        // stop all tasks on all schedulers
+                        for s in context.scheduler_channels.values() {
+                            s.send(SchedulerCommand::SetTaskStateAll(false)).unwrap();
+                        }
+
+                        print_hard_statistics(1u16);
+
+                        for port in context.ports.values() {
+                            println!("Port {}:{}", port.port_type(), port.port_id());
+                            port.print_soft_statistics();
+                        }
+                        println!("terminating TrafficEngine ...");
+                        context.stop();
+                        break;
+                    }
+                    Ok(MessageFrom::Task(pipeline_id, uuid, task_type)) => {
+                        debug!("{}: task uuid= {}, type={:?}", pipeline_id, uuid, task_type);
+                        tasks[task_type as usize].push((pipeline_id, uuid));
+                    }
+                    Ok(MessageFrom::Counter(pipeline_id, tcp_counter_to, tcp_counter_from, tx_counter)) => {
+                        debug!("{}: received Counter", pipeline_id);
+                            reply_to_main
+                                .send(MessageTo::Counter(pipeline_id, tcp_counter_to, tcp_counter_from, tx_counter))
+                                .unwrap();
+                    }
+                    Ok(MessageFrom::FetchCounter) => {
+                        for (_p, s) in &senders {
+                            s.send(MessageTo::FetchCounter).unwrap();
+                        }
+                    }
+                    Ok(MessageFrom::CRecords(pipeline_id, c_records_client, c_records_server)) => {
+                            reply_to_main
+                                .send(MessageTo::CRecords(pipeline_id, c_records_client, c_records_server))
+                                .unwrap();
+                    }
+                    Ok(MessageFrom::FetchCRecords) => {
+                        for (_p, s) in &senders {
+                            s.send(MessageTo::FetchCRecords).unwrap();
+                        }
+                    }
+                    Ok(MessageFrom::TimeStamps(p, t0, t1)) => {
+                            reply_to_main
+                                .send(MessageTo::TimeStamps(p, t0, t1))
+                                .unwrap();
+                    }
+                    Err(RecvTimeoutError::Timeout) => {}
+                    Err(e) => {
+                        error!("error receiving from MessageFrom channel: {}", e);
+                        break;
+                    }
+                    //m => warn!("unknown Result: {:?}", m),
+                };
+                match context
+                    .reply_receiver
+                    .as_ref()
+                    .unwrap()
+                    .recv_timeout(Duration::from_millis(10))
+                    {
+                        Ok(SchedulerReply::PerformanceData(core, map)) => {
+                            for d in map {
+                                info!(
+                                    "{:2}: {:20} {:>15} count= {:12}, queue length= {}",
+                                    core,
+                                    (d.1).0,
+                                    (d.1).1.separated_string(),
+                                    (d.1).2.separated_string(),
+                                    (d.1).3
+                                )
+                            }
+                        }
+                        Err(RecvTimeoutError::Timeout) => {}
+                        Err(e) => {
+                            error!("error receiving from SchedulerReply channel: {}", e);
+                            break;
+                        }
+                    }
+            }
+            info!("exiting recv thread ...");
+        });
+    }
+
 }
 
 pub fn setup_kernel_interfaces(context: &NetBricksContext) {
@@ -546,76 +702,8 @@ fn get_tcp_port_base(port: &PmdPort, count: u16) -> u16 {
     port_mask - count * (!port_mask + 1)
 }
 
-pub fn initialize_flowdirector(port: &Arc<PmdPort>, kni: &Arc<PmdPort>) -> Option<FlowDirector> {
-    info!("initialize flowdirector for port {} with kni = {}", port.name(), kni.name());
-    if *port.port_type() == PortType::Physical && port.flow_steering_mode().is_some() {
-        // initialize flow director on port, cannot do this in parallel from multiple threads
-        let steering_mode = port.flow_steering_mode().clone().unwrap();
-        let mut flowdir = FlowDirector::new(port.clone());
-        assert!(kni.net_spec().is_some());
-        let ip_addr_first = kni.net_spec().as_ref().unwrap().ip_net.as_ref().unwrap().addr();
-        for (i, _core) in port.rx_cores.as_ref().unwrap().iter().enumerate() {
-            match steering_mode {
-                FlowSteeringMode::Ip => {
-                    let dst_ip = u32::from(ip_addr_first) + i as u32 + 1;
-                    let dst_port = port.get_tcp_dst_port_mask();
-                    debug!(
-                        "set fdir filter on port {} for rfs mode IP: queue= {}, ip= {}, port base = {}",
-                        port.port_id(),
-                        i,
-                        Ipv4Addr::from(dst_ip),
-                        dst_port,
-                    );
-                    flowdir.add_fdir_filter(i as u16, dst_ip, dst_port).unwrap();
-                }
-                FlowSteeringMode::Port => {
-                    let dst_ip = u32::from(ip_addr_first);
-                    let dst_port = get_tcp_port_base(port, i as u16);
-                    debug!(
-                        "set fdir filter on port {} for rfs mode Port: queue= {}, ip= {}, port base = {}",
-                        port.port_id(),
-                        i,
-                        Ipv4Addr::from(dst_ip),
-                        dst_port,
-                    );
-                    flowdir.add_fdir_filter(i as u16, dst_ip, dst_port).unwrap();
-                }
-            }
-        }
-        Some(flowdir)
-    } else {
-        error!("need a physical port with defined flow steering mode for flowdirector");
-        None
-    }
-}
 
-pub fn setup_flowdirector_map(context: &NetBricksContext) -> HashMap<u16, Arc<FlowDirector>> {
-    let mut flowdirector_map: HashMap<u16, Arc<FlowDirector>> = HashMap::new();
-    for port in context
-        .ports
-        .values()
-        .filter(|p| p.is_physical() && p.flow_steering_mode().is_some())
-    {
-        if port.kni_name().is_some() {
-            let opt_kni = context.ports.get(*port.kni_name().as_ref().unwrap());
-            if opt_kni.is_some() {
-                let kni = opt_kni.unwrap();
-                let flow_dir = initialize_flowdirector(port, kni);
-                if flow_dir.is_some() {
-                    flowdirector_map.insert(port.port_id(), Arc::new(flow_dir.unwrap()));
-                    unsafe {
-                        fdir_get_infos(port.port_id());
-                    }
-                }
-            } else {
-                error!("kni {} for port {} not found", port.kni_name().as_ref().unwrap(), port.name());
-            }
-        } else {
-            error!("port {} has no kni interface assigned", port.name());
-        }
-    }
-    flowdirector_map
-}
+
 
 #[inline]
 pub fn do_ttl(p: &mut Pdu) {

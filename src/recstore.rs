@@ -4,8 +4,11 @@ use std::cmp;
 use std::fmt::Display;
 use std::cell::RefCell;
 use std::rc::Rc;
-use {ConRecord, HasConData, HasTcpState, ReleaseCause};
+use conrecord::{ConRecord, HasConData, HasTcpState};
+use {ReleaseCause};
 use TcpState;
+
+pub type TEngineStore = RecordStore<ConRecord>;
 
 pub trait Storable: Sized + Display + Clone {
     fn new() -> Self;
