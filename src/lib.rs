@@ -27,7 +27,6 @@ pub use recstore::Store64;
 pub use recstore::Storable;
 pub use recstore::ConRecordOperations;
 
-use recstore::TEngineStore;
 use comm::{MessageFrom, MessageTo, PipelineId};
 use system::SystemData;
 use tasks::TaskType;
@@ -75,32 +74,33 @@ struct Config<T: Sized + Clone> {
 }
 
 #[derive(Clone)]
-pub struct RunConfiguration<T: Sized + Clone> {
+pub struct RunConfiguration<T: Sized + Clone, TStore: SimpleStore + Clone> {
     pub system_data: SystemData,
     pub netbricks_configuration: NetbricksConfiguration,
     pub engine_configuration: T,
     pub flowdirector_map: HashMap<u16, Arc<FlowDirector>>,
-    pub remote_sender: Sender<MessageFrom<TEngineStore>>,
-    pub local_sender: Sender<MessageTo<TEngineStore>>,
+    pub remote_sender: Sender<MessageFrom<TStore>>,
+    pub local_sender: Sender<MessageTo<TStore>>,
 }
 
 
-pub struct RunTime<T:Sized + Clone + Send>
+pub struct RunTime<T:Sized + Clone + Send, TStore: SimpleStore + Clone>
 {
-    pub run_configuration: RunConfiguration<T>,
+    pub run_configuration: RunConfiguration<T, TStore>,
     context: Option<NetBricksContext>,
     /// receiver in run_time thread for messages from all the pipelines running, and usually from main thread
     /// will be moved into the run_time thread
-    local_receiver: Option<Receiver<MessageFrom<TEngineStore>>>,
+    local_receiver: Option<Receiver<MessageFrom<TStore>>>,
     /// a single receiver instance for messages sent by run_time thread and pipelines, usually retrieved by main thread
     /// see also get_main_channel()
-    remote_receiver: Option<Receiver<MessageTo<TEngineStore>>>,
+    remote_receiver: Option<Receiver<MessageTo<TStore>>>,
+    toml_file: String,
 }
 
-impl<T:Sized + Clone + Send> RunTime<T>
+impl<T:Sized + Clone + Send, TStore: 'static + SimpleStore + Clone> RunTime<T, TStore>
     where T: DeserializeOwned
 {
-    fn read_config(filename: &str) -> E2d2Result<T> {
+    fn read_config(filename: &str) -> E2d2Result<Config<T>> {
         let mut toml_str = String::new();
         if File::open(filename)
             .and_then(|mut f| f.read_to_string(&mut toml_str))
@@ -111,7 +111,7 @@ impl<T:Sized + Clone + Send> RunTime<T>
 
         info!("toml configuration:\n {}", toml_str);
 
-        let config: T = match toml::from_str(&toml_str) {
+        let config: Config<T> = match toml::from_str(&toml_str) {
             Ok(value) => value,
             Err(err) => return Err(err.into()),
         };
@@ -185,7 +185,7 @@ impl<T:Sized + Clone + Send> RunTime<T>
         }
     }
 
-    pub fn init_with_toml_file(toml_file: &String) -> E2d2Result<RunTime<T>> {
+    pub fn init_with_toml_file(toml_file: &String) -> E2d2Result<RunTime<T, TStore>> {
 
         env_logger::init();
 
@@ -217,7 +217,7 @@ impl<T:Sized + Clone + Send> RunTime<T>
         }
 
         let opts = basic_opts();
-        let args: Vec<String> = vec!["-f".to_string(), toml_file.clone()];
+        let args: Vec<String> = vec!["-f".to_string(), toml_file.trim().to_string()];
 
         let matches = match opts.parse(&args[..]) {
             Ok(m) => m,
@@ -225,17 +225,17 @@ impl<T:Sized + Clone + Send> RunTime<T>
         };
         let netbricks_configuration = read_matches(&matches, &opts);
 
-        let config: Config<T> = RunTime::read_config(&toml_file)?;
+        let config: Config<T> = RunTime::<T, TStore>::read_config(&toml_file.trim())?;
         let engine_configuration= config.engine;
 
 
-        let (remote_sender, local_receiver) = channel::<MessageFrom<TEngineStore>>();
-        let (local_sender, remote_receiver) = channel::<MessageTo<TEngineStore>>();
+        let (remote_sender, local_receiver) = channel::<MessageFrom<TStore>>();
+        let (local_sender, remote_receiver) = channel::<MessageTo<TStore>>();
 
 
         match initialize_system(&netbricks_configuration)
             .map_err(|e| e.into())
-            .and_then(|ctxt| RunTime::<T>::check_system(ctxt))
+            .and_then(|ctxt| RunTime::<T, TStore>::check_system(ctxt))
             {
                 Ok(context) => {
                     Ok(RunTime {
@@ -249,7 +249,8 @@ impl<T:Sized + Clone + Send> RunTime<T>
                         },
                         context: Some(context),
                         local_receiver: Some(local_receiver),
-                        remote_receiver: Some(remote_receiver)
+                        remote_receiver: Some(remote_receiver),
+                        toml_file: toml_file.clone()
                     })
                 },
                 Err(e) => {
@@ -260,7 +261,8 @@ impl<T:Sized + Clone + Send> RunTime<T>
 
     }
 
-    pub fn init() -> E2d2Result<RunTime<T>> {
+    /// initializes with a toml-file whose name is in args[1]
+    pub fn init() -> E2d2Result<RunTime<T, TStore>> {
         // read config file name from command line
         let args: Vec<String> = env::args().collect();
         let config_file;
@@ -273,8 +275,21 @@ impl<T:Sized + Clone + Send> RunTime<T>
         RunTime::init_with_toml_file(&config_file)
     }
 
+    /// initializes with a toml-file whose name is read from an indirection file
+    pub fn init_indirectly(indirection_pathname: &str) -> E2d2Result<RunTime<T, TStore>> {
+        let mut f = File::open(indirection_pathname).expect("file not found");
+        let mut toml_file = String::new();
+        f.read_to_string(&mut toml_file)
+            .expect("something went wrong reading ./tests/toml_file.txt");
+        //cut off white spaces at the end:
+        toml_file.truncate(toml_file.trim_end().len());
+        RunTime::init_with_toml_file(&toml_file)
+    }
+
+    pub fn toml_filename(&self) -> &String { &self.toml_file }
+
     /// this returns the communication channel to the run_time thread, only the first call returns the channel
-    pub fn get_main_channel(&mut self) -> Option<(Sender<MessageFrom<TEngineStore>>, Receiver<MessageTo<TEngineStore>>)> {
+    pub fn get_main_channel(&mut self) -> Option<(Sender<MessageFrom<TStore>>, Receiver<MessageTo<TStore>>)> {
         if self.remote_receiver.is_some() {
             Some((self.run_configuration.remote_sender.clone(), self.remote_receiver.take().unwrap()))
         } else { None }
@@ -307,7 +322,7 @@ impl<T:Sized + Clone + Send> RunTime<T>
                     let opt_kni = self.context.as_ref().unwrap().ports.get(*port.kni_name().as_ref().unwrap());
                     if opt_kni.is_some() {
                         let kni = opt_kni.unwrap();
-                        let flow_dir = RunTime::<T>::initialize_flowdirector(port, kni);
+                        let flow_dir = RunTime::<T, TStore>::initialize_flowdirector(port, kni);
                         if flow_dir.is_some() {
                             self.run_configuration.flowdirector_map.insert(port.port_id(), Arc::new(flow_dir.unwrap()));
                             unsafe {

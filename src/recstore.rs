@@ -10,16 +10,17 @@ use TcpState;
 
 pub type TEngineStore = RecordStore<ConRecord>;
 
-pub trait Storable: Sized + Display + Clone {
+pub trait Storable: Sized + Send + Display + Clone {
     fn new() -> Self;
 }
 
-pub trait SimpleStore {
+pub trait SimpleStore: Send {
     #[inline]
     fn get(&self, slot: usize) -> &ConRecord;
     fn get_mut(&mut self, slot: usize) -> &mut ConRecord;
 }
 
+#[derive(Clone)]
 pub struct RecordStore<T: Storable> {
     store: Vec<T>,
     record_count: usize,
@@ -104,6 +105,7 @@ impl SimpleStore for RecordStore<ConRecord> {
     }
 }
 
+#[derive(Clone)]
 pub struct Store64<T: Storable> {
     store_0: Vec<ConRecord>,
     store_1: Vec<T>,
