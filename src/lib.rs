@@ -32,7 +32,7 @@ use system::SystemData;
 use tasks::TaskType;
 use io::print_hard_statistics;
 
-use std::collections::{ HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 
 use std::net::{Ipv4Addr};
 use std::process::Command;
@@ -52,21 +52,20 @@ use uuid::Uuid;
 use separator::Separatable;
 
 use e2d2::allocators::CacheAligned;
-use e2d2::interface::{
-    FlowDirector, FlowSteeringMode, PmdPort, PortQueue, PortQueueTxBuffered, PortType, Pdu, update_tcp_checksum_
-};
+use e2d2::interface::{FlowDirector, FlowSteeringMode, PmdPort, PortQueue, PortQueueTxBuffered, PortType, Pdu,
+                  update_tcp_checksum_};
 use e2d2::common::ErrorKind as E2d2ErrorKind;
 use e2d2::common::errors::Result as E2d2Result;
-use e2d2::native::zcsi::{ipv4_phdr_chksum, rte_log_set_global_level, rte_log_set_level, rte_log_get_global_level, rte_log_get_level, RteLogLevel, RteLogtype};
+use e2d2::native::zcsi::{ipv4_phdr_chksum, RteLogLevel, RteLogtype};
 use e2d2::headers::{EndOffset, IpHeader, MacHeader, TcpHeader};
 use e2d2::native::zcsi::fdir_get_infos;
 use e2d2::config::{basic_opts, read_matches, NetbricksConfiguration};
-use e2d2::native::zcsi::{RteFilterType, rte_eth_dev_filter_supported};
 use e2d2::scheduler::{NetBricksContext, initialize_system, SchedulerCommand, SchedulerReply, StandaloneScheduler};
 
 use tcp_common::{ReleaseCause, TcpRole, TcpState, L234Data, tcp_payload_size};
 use tcp_common::tcp_start_state;
-
+use e2d2::native::zcsi::rte_ethdev_api::{rte_log_set_global_level, rte_log_set_level, rte_log_get_global_level,
+                                     rte_log_get_level};
 
 #[derive(Deserialize, Clone)]
 struct Config<T: Sized + Clone> {
@@ -83,9 +82,7 @@ pub struct RunConfiguration<T: Sized + Clone, TStore: SimpleStore + Clone> {
     pub local_sender: Sender<MessageTo<TStore>>,
 }
 
-
-pub struct RunTime<T:Sized + Clone + Send, TStore: SimpleStore + Clone>
-{
+pub struct RunTime<T: Sized + Clone + Send, TStore: SimpleStore + Clone> {
     pub run_configuration: RunConfiguration<T, TStore>,
     context: Option<NetBricksContext>,
     /// receiver in run_time thread for messages from all the pipelines running, and usually from main thread
@@ -97,8 +94,9 @@ pub struct RunTime<T:Sized + Clone + Send, TStore: SimpleStore + Clone>
     toml_file: String,
 }
 
-impl<T:Sized + Clone + Send, TStore: 'static + SimpleStore + Clone> RunTime<T, TStore>
-    where T: DeserializeOwned
+impl<T: Sized + Clone + Send, TStore: 'static + SimpleStore + Clone> RunTime<T, TStore>
+where
+    T: DeserializeOwned,
 {
     fn read_config(filename: &str) -> E2d2Result<Config<T>> {
         let mut toml_str = String::new();
@@ -124,6 +122,7 @@ impl<T:Sized + Clone + Send, TStore: 'static + SimpleStore + Clone> RunTime<T, T
         for i in 0..num_pmd_ports {
             PmdPort::print_eth_dev_info(i as u16);
         }
+        /*
         for port in context.ports.values() {
             if port.port_type() == &PortType::Physical {
                 debug!("Supported filters on port {}:", port.port_id());
@@ -138,9 +137,9 @@ impl<T:Sized + Clone + Send, TStore: 'static + SimpleStore + Clone> RunTime<T, T
                 }
             }
         }
+         */
         Ok(context)
     }
-
 
     fn initialize_flowdirector(port: &Arc<PmdPort>, kni: &Arc<PmdPort>) -> Option<FlowDirector> {
         info!("initialize flowdirector for port {} with kni = {}", port.name(), kni.name());
@@ -155,26 +154,32 @@ impl<T:Sized + Clone + Send, TStore: 'static + SimpleStore + Clone> RunTime<T, T
                     FlowSteeringMode::Ip => {
                         let dst_ip = u32::from(ip_addr_first) + i as u32 + 1;
                         let dst_port = port.get_tcp_dst_port_mask();
-                        debug!(
-                            "set fdir filter on port {} for rfs mode IP: queue= {}, ip= {}, port base = {}",
+                        info!(
+                            "set fdir filter on dpdk port {} for dst-IP receive flow steering: queue= {}, ip= {}, port base = {:#X}",
                             port.port_id(),
                             i,
                             Ipv4Addr::from(dst_ip),
                             dst_port,
                         );
-                        flowdir.add_fdir_filter(i as u16, dst_ip, dst_port).unwrap();
+                        flowdir.add_tcp_flow_rule(i as u16, dst_ip, port.get_ipv4_dst_mask(), dst_port, dst_port);
                     }
                     FlowSteeringMode::Port => {
                         let dst_ip = u32::from(ip_addr_first);
                         let dst_port = get_tcp_port_base(port, i as u16);
-                        debug!(
-                            "set fdir filter on port {} for rfs mode Port: queue= {}, ip= {}, port base = {}",
+                        info!(
+                            "set fdir filter on dpdk port {} for dst-port receive flow steering: queue= {}, ip= {}, port base = {:#X}",
                             port.port_id(),
                             i,
                             Ipv4Addr::from(dst_ip),
                             dst_port,
                         );
-                        flowdir.add_fdir_filter(i as u16, dst_ip, dst_port).unwrap();
+                        flowdir.add_tcp_flow_rule(
+                            i as u16,
+                            dst_ip,
+                            port.get_ipv4_dst_mask(),
+                            dst_port,
+                            port.get_tcp_dst_port_mask(),
+                        );
                     }
                 }
             }
@@ -186,19 +191,19 @@ impl<T:Sized + Clone + Send, TStore: 'static + SimpleStore + Clone> RunTime<T, T
     }
 
     pub fn init_with_toml_file(toml_file: &String) -> E2d2Result<RunTime<T, TStore>> {
-
-        env_logger::init();
-
         let log_level_rte = if log_enabled!(log::Level::Debug) {
             RteLogLevel::RteLogDebug
         } else {
             RteLogLevel::RteLogInfo
         };
         unsafe {
-            rte_log_set_global_level(log_level_rte);
-            rte_log_set_level(RteLogtype::RteLogtypePmd, log_level_rte);
+            rte_log_set_global_level(log_level_rte as u32);
+            rte_log_set_level(RteLogtype::RteLogtypePmd as u32, log_level_rte as u32);
             info!("dpdk log global level: {}", rte_log_get_global_level());
-            info!("dpdk log level for PMD: {}", rte_log_get_level(RteLogtype::RteLogtypePmd));
+            info!(
+                "dpdk log level for PMD: {}",
+                rte_log_get_level(RteLogtype::RteLogtypePmd as u32)
+            );
         }
 
         fn am_root() -> bool {
@@ -226,39 +231,34 @@ impl<T:Sized + Clone + Send, TStore: 'static + SimpleStore + Clone> RunTime<T, T
         let netbricks_configuration = read_matches(&matches, &opts);
 
         let config: Config<T> = RunTime::<T, TStore>::read_config(&toml_file.trim())?;
-        let engine_configuration= config.engine;
-
+        let engine_configuration = config.engine;
 
         let (remote_sender, local_receiver) = channel::<MessageFrom<TStore>>();
         let (local_sender, remote_receiver) = channel::<MessageTo<TStore>>();
 
-
         match initialize_system(&netbricks_configuration)
             .map_err(|e| e.into())
             .and_then(|ctxt| RunTime::<T, TStore>::check_system(ctxt))
-            {
-                Ok(context) => {
-                    Ok(RunTime {
-                        run_configuration: RunConfiguration {
-                            system_data: SystemData::detect(),
-                            netbricks_configuration,
-                            engine_configuration,
-                            flowdirector_map: HashMap::new(),
-                            remote_sender,
-                            local_sender
-                        },
-                        context: Some(context),
-                        local_receiver: Some(local_receiver),
-                        remote_receiver: Some(remote_receiver),
-                        toml_file: toml_file.clone()
-                    })
+        {
+            Ok(context) => Ok(RunTime {
+                run_configuration: RunConfiguration {
+                    system_data: SystemData::detect(),
+                    netbricks_configuration,
+                    engine_configuration,
+                    flowdirector_map: HashMap::new(),
+                    remote_sender,
+                    local_sender,
                 },
-                Err(e) => {
-                    error!("Error: {}", e);
-                    Err(e)
-                }
+                context: Some(context),
+                local_receiver: Some(local_receiver),
+                remote_receiver: Some(remote_receiver),
+                toml_file: toml_file.clone(),
+            }),
+            Err(e) => {
+                error!("Error: {}", e);
+                Err(e)
             }
-
+        }
     }
 
     /// initializes with a toml-file whose name is in args[1]
@@ -286,58 +286,76 @@ impl<T:Sized + Clone + Send, TStore: 'static + SimpleStore + Clone> RunTime<T, T
         RunTime::init_with_toml_file(&toml_file)
     }
 
-    pub fn toml_filename(&self) -> &String { &self.toml_file }
+    pub fn toml_filename(&self) -> &String {
+        &self.toml_file
+    }
 
     /// this returns the communication channel to the run_time thread, only the first call returns the channel
     pub fn get_main_channel(&mut self) -> Option<(Sender<MessageFrom<TStore>>, Receiver<MessageTo<TStore>>)> {
         if self.remote_receiver.is_some() {
-            Some((self.run_configuration.remote_sender.clone(), self.remote_receiver.take().unwrap()))
-        } else { None }
+            Some((
+                self.run_configuration.remote_sender.clone(),
+                self.remote_receiver.take().unwrap(),
+            ))
+        } else {
+            None
+        }
     }
 
     fn context_mut(&mut self) -> E2d2Result<&mut NetBricksContext> {
         if self.context.is_none() {
-            return Err(E2d2ErrorKind::RunTimeError("context consumed by spawn_recv_thread already".to_string()))
+            return Err(E2d2ErrorKind::RunTimeError(
+                "context consumed by spawn_recv_thread already".to_string(),
+            ));
         }
         Ok(self.context.as_mut().unwrap())
     }
 
     pub fn context(&self) -> E2d2Result<&NetBricksContext> {
         if self.context.is_none() {
-            return Err(E2d2ErrorKind::RunTimeError("context consumed by spawn_recv_thread already".to_string()))
+            return Err(E2d2ErrorKind::RunTimeError(
+                "context consumed by spawn_recv_thread already".to_string(),
+            ));
         }
         Ok(self.context.as_ref().unwrap())
     }
 
     pub fn setup_flowdirector(&mut self) -> E2d2Result<()> {
         if self.context.is_none() {
-            return Err(E2d2ErrorKind::RunTimeError("context consumed by spawn_recv_thread already".to_string()))
+            return Err(E2d2ErrorKind::RunTimeError(
+                "context consumed by spawn_recv_thread already".to_string(),
+            ));
         }
-        for port in self.context.as_ref().unwrap()
+        for port in self
+            .context
+            .as_ref()
+            .unwrap()
             .ports
             .values()
             .filter(|p| p.is_physical() && p.flow_steering_mode().is_some())
-            {
-                if port.kni_name().is_some() {
-                    let opt_kni = self.context.as_ref().unwrap().ports.get(*port.kni_name().as_ref().unwrap());
-                    if opt_kni.is_some() {
-                        let kni = opt_kni.unwrap();
-                        let flow_dir = RunTime::<T, TStore>::initialize_flowdirector(port, kni);
-                        if flow_dir.is_some() {
-                            self.run_configuration.flowdirector_map.insert(port.port_id(), Arc::new(flow_dir.unwrap()));
-                            unsafe {
-                                fdir_get_infos(port.port_id());
-                            }
+        {
+            if port.kni_name().is_some() {
+                let opt_kni = self.context.as_ref().unwrap().ports.get(*port.kni_name().as_ref().unwrap());
+                if opt_kni.is_some() {
+                    let kni = opt_kni.unwrap();
+                    let flow_dir = RunTime::<T, TStore>::initialize_flowdirector(port, kni);
+                    if flow_dir.is_some() {
+                        self.run_configuration
+                            .flowdirector_map
+                            .insert(port.port_id(), Arc::new(flow_dir.unwrap()));
+                        unsafe {
+                            fdir_get_infos(port.port_id());
                         }
-                    } else {
-                        error!("kni {} for port {} not found", port.kni_name().as_ref().unwrap(), port.name());
-                        return Err(E2d2ErrorKind::FailedToInitializeKni(port.name().to_string()))
                     }
                 } else {
-                    error!("port {} has no kni interface assigned", port.name());
-                    return Err(E2d2ErrorKind::FailedToInitializeKni(port.name().to_string()))
+                    error!("kni {} for port {} not found", port.kni_name().as_ref().unwrap(), port.name());
+                    return Err(E2d2ErrorKind::FailedToInitializeKni(port.name().to_string()));
                 }
+            } else {
+                error!("port {} has no kni interface assigned", port.name());
+                return Err(E2d2ErrorKind::FailedToInitializeKni(port.name().to_string()));
             }
+        }
         Ok(())
     }
 
@@ -348,25 +366,25 @@ impl<T:Sized + Clone + Send, TStore: 'static + SimpleStore + Clone> RunTime<T, T
     }
 
     pub fn install_pipeline_on_cores<P>(&mut self, run: Box<P>) -> E2d2Result<()>
-        where
-            P: Fn(i32, HashMap<String, Arc<PmdPort>>, &mut StandaloneScheduler) + Send + Clone + 'static,
+    where
+        P: Fn(i32, HashMap<String, Arc<PmdPort>>, &mut StandaloneScheduler) + Send + Clone + 'static,
     {
         self.context_mut()?.install_pipeline_on_cores(run);
         Ok(())
     }
 
     pub fn add_pipeline_to_run<P>(&mut self, run: Box<P>) -> E2d2Result<()>
-        where
-            P: Fn(i32, HashSet<CacheAligned<PortQueue>>, &mut StandaloneScheduler) + Send + Clone + 'static, {
+    where
+        P: Fn(i32, HashSet<CacheAligned<PortQueue>>, &mut StandaloneScheduler) + Send + Clone + 'static,
+    {
         self.context_mut()?.add_pipeline_to_run(run);
         Ok(())
     }
 
     /// start spawns_run_time_thread and consumes self.context and self.local_receiver (thread needs static lifetime)
     pub fn start(&mut self) {
-
-        let mut context=self.context.take().unwrap();
-        let mrx= self.local_receiver.take().unwrap();
+        let mut context = self.context.take().unwrap();
+        let mrx = self.local_receiver.take().unwrap();
         let reply_to_main = self.run_configuration.local_sender.clone();
 
         let _handle = thread::spawn(move || {
@@ -418,7 +436,7 @@ impl<T:Sized + Clone + Send, TStore: 'static + SimpleStore + Clone> RunTime<T, T
                             println!("Port {}:{}", port.port_type(), port.port_id());
                             port.print_soft_statistics();
                         }
-                        println!("terminating TrafficEngine ...");
+                        info!("terminating RunTime ...");
                         context.stop();
                         break;
                     }
@@ -428,9 +446,9 @@ impl<T:Sized + Clone + Send, TStore: 'static + SimpleStore + Clone> RunTime<T, T
                     }
                     Ok(MessageFrom::Counter(pipeline_id, tcp_counter_to, tcp_counter_from, tx_counter)) => {
                         debug!("{}: received Counter", pipeline_id);
-                            reply_to_main
-                                .send(MessageTo::Counter(pipeline_id, tcp_counter_to, tcp_counter_from, tx_counter))
-                                .unwrap();
+                        reply_to_main
+                            .send(MessageTo::Counter(pipeline_id, tcp_counter_to, tcp_counter_from, tx_counter))
+                            .unwrap();
                     }
                     Ok(MessageFrom::FetchCounter) => {
                         for (_p, s) in &senders {
@@ -438,9 +456,9 @@ impl<T:Sized + Clone + Send, TStore: 'static + SimpleStore + Clone> RunTime<T, T
                         }
                     }
                     Ok(MessageFrom::CRecords(pipeline_id, c_records_client, c_records_server)) => {
-                            reply_to_main
-                                .send(MessageTo::CRecords(pipeline_id, c_records_client, c_records_server))
-                                .unwrap();
+                        reply_to_main
+                            .send(MessageTo::CRecords(pipeline_id, c_records_client, c_records_server))
+                            .unwrap();
                     }
                     Ok(MessageFrom::FetchCRecords) => {
                         for (_p, s) in &senders {
@@ -448,46 +466,42 @@ impl<T:Sized + Clone + Send, TStore: 'static + SimpleStore + Clone> RunTime<T, T
                         }
                     }
                     Ok(MessageFrom::TimeStamps(p, t0, t1)) => {
-                            reply_to_main
-                                .send(MessageTo::TimeStamps(p, t0, t1))
-                                .unwrap();
+                        reply_to_main.send(MessageTo::TimeStamps(p, t0, t1)).unwrap();
                     }
                     Err(RecvTimeoutError::Timeout) => {}
                     Err(e) => {
                         error!("error receiving from MessageFrom channel: {}", e);
                         break;
-                    }
-                    //m => warn!("unknown Result: {:?}", m),
+                    } //m => warn!("unknown Result: {:?}", m),
                 };
                 match context
                     .reply_receiver
                     .as_ref()
                     .unwrap()
                     .recv_timeout(Duration::from_millis(10))
-                    {
-                        Ok(SchedulerReply::PerformanceData(core, map)) => {
-                            for d in map {
-                                info!(
-                                    "{:2}: {:20} {:>15} count= {:12}, queue length= {}",
-                                    core,
-                                    (d.1).0,
-                                    (d.1).1.separated_string(),
-                                    (d.1).2.separated_string(),
-                                    (d.1).3
-                                )
-                            }
-                        }
-                        Err(RecvTimeoutError::Timeout) => {}
-                        Err(e) => {
-                            error!("error receiving from SchedulerReply channel: {}", e);
-                            break;
+                {
+                    Ok(SchedulerReply::PerformanceData(core, map)) => {
+                        for d in map {
+                            info!(
+                                "{:2}: {:20} {:>15} count= {:12}, queue length= {}",
+                                core,
+                                (d.1).0,
+                                (d.1).1.separated_string(),
+                                (d.1).2.separated_string(),
+                                (d.1).3
+                            )
                         }
                     }
+                    Err(RecvTimeoutError::Timeout) => {}
+                    Err(e) => {
+                        error!("error receiving from SchedulerReply channel: {}", e);
+                        break;
+                    }
+                }
             }
             info!("exiting recv thread ...");
         });
     }
-
 }
 
 pub fn setup_kernel_interfaces(context: &NetBricksContext) {
@@ -652,8 +666,8 @@ pub fn new_port_queues_for_core(
     pmd_port: &Arc<PmdPort>,
     associated_kni_port: Option<&Arc<PmdPort>>,
 ) -> (Option<CacheAligned<PortQueueTxBuffered>>, Option<CacheAligned<PortQueue>>) {
-    let mut kni: Option<CacheAligned<PortQueue>>;
-    let mut pci: Option<CacheAligned<PortQueueTxBuffered>>;
+    let kni: Option<CacheAligned<PortQueue>>;
+    let pci: Option<CacheAligned<PortQueueTxBuffered>>;
 
     let queue = pmd_port
         .rx_cores
@@ -716,9 +730,6 @@ fn get_tcp_port_base(port: &PmdPort, count: u16) -> u16 {
     let port_mask = port.get_tcp_dst_port_mask();
     port_mask - count * (!port_mask + 1)
 }
-
-
-
 
 #[inline]
 pub fn do_ttl(p: &mut Pdu) {

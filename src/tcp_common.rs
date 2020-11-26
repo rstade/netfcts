@@ -4,7 +4,7 @@ use std::fmt;
 use std::fmt::Write;
 use std::net::SocketAddrV4;
 use std::ops::{Index, IndexMut};
-use e2d2::interface::{Pdu, NetSpec };
+use e2d2::interface::{Pdu, NetSpec};
 use e2d2::common;
 
 use eui48::MacAddress;
@@ -218,8 +218,8 @@ impl TryFrom<NetSpec> for L234Data {
 }
 
 pub trait UserData: Send + Sync + 'static {
-    fn ref_userdata(&self) -> &Any;
-    fn mut_userdata(&mut self) -> &mut Any;
+    fn ref_userdata(&self) -> &dyn Any;
+    fn mut_userdata(&mut self) -> &mut dyn Any;
     fn init(&mut self);
 }
 

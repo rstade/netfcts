@@ -15,7 +15,6 @@ pub trait Storable: Sized + Send + Display + Clone {
 }
 
 pub trait SimpleStore: Send {
-    #[inline]
     fn get(&self, slot: usize) -> &ConRecord;
     fn get_mut(&mut self, slot: usize) -> &mut ConRecord;
 }
@@ -200,11 +199,9 @@ impl<T: Storable> fmt::Debug for Store64<T> {
 
 pub trait ConRecordOperations<S: SimpleStore> {
     /// return reference to reference counted pointer to store for the connection
-    #[inline]
     fn store(&self) -> &Rc<RefCell<S>>;
 
     /// return index of connection record in store
-    #[inline]
     fn con_rec(&self) -> usize;
 
     #[inline]
@@ -212,7 +209,6 @@ pub trait ConRecordOperations<S: SimpleStore> {
         self.store().borrow().get(self.con_rec()).port()
     }
 
-    #[inline]
     fn in_use(&self) -> bool;
 
     #[inline]
