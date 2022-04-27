@@ -1,3 +1,4 @@
+use std::arch::x86_64::_rdtsc;
 use e2d2::headers::{IpHeader, MacHeader, TcpHeader};
 use e2d2::interface::PmdPort;
 use e2d2::interface::Pdu;
@@ -6,8 +7,6 @@ use e2d2::native::zcsi::{mbuf_alloc_bulk, MBuf};
 use e2d2::queues::MpscProducer;
 use e2d2::scheduler::{Executable, Runnable, Scheduler, StandaloneScheduler};
 use std::sync::Arc;
-
-use e2d2::utils;
 use tcp_common::L234Data;
 use uuid::Uuid;
 //use separator::Separatable;
@@ -35,7 +34,7 @@ pub struct KniHandleRequest {
 
 impl Executable for KniHandleRequest {
     fn execute(&mut self) -> (u32, i32) {
-        let now = utils::rdtsc_unsafe();
+        let now = unsafe { _rdtsc() };
         if now - self.last_tick >= 22700 * 1000 {
             // roughly each 10 ms
             unsafe {
@@ -132,7 +131,7 @@ impl<'a> PacketInjector<'a> {
 
 impl<'a> Executable for PacketInjector<'a> {
     fn execute(&mut self) -> (u32, i32) {
-        let now = utils::rdtsc_unsafe();
+        let now = unsafe { _rdtsc() };
         if self.start_time == 0 {
             self.start_time = now;
         }
@@ -153,7 +152,7 @@ impl<'a> Executable for PacketInjector<'a> {
             inserted = self.producer.enqueue_mbufs(&mbuf_ptr_array);
             self.sent_packets += inserted;
             assert_eq!(inserted, INJECTOR_BATCH_SIZE);
-            self.lastbatch_timestamp = utils::rdtsc_unsafe();
+            self.lastbatch_timestamp = unsafe { _rdtsc() };
         }
         (inserted as u32, self.producer.used_slots() as i32)
     }
@@ -218,7 +217,7 @@ impl<'a> TickGenerator<'a> {
 impl<'a> Executable for TickGenerator<'a> {
     fn execute(&mut self) -> (u32, i32) {
         let p;
-        let now = utils::rdtsc_unsafe();
+        let now = unsafe { _rdtsc() };
         if now - self.last_tick >= self.tick_length {
             unsafe {
                 p = self.packet_prototype.copy();

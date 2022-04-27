@@ -152,15 +152,11 @@ impl fmt::Display for TcpStatistics {
 }
 
 #[derive(Debug, Clone)]
-pub struct TcpCounter {
-    counter: [usize; TcpStatistics::Count as usize],
-}
+pub struct TcpCounter([usize; TcpStatistics::Count as usize]);
 
 impl TcpCounter {
     pub fn new() -> TcpCounter {
-        TcpCounter {
-            counter: [0; TcpStatistics::Count as usize],
-        }
+        TcpCounter([0; TcpStatistics::Count as usize])
     }
 }
 
@@ -169,14 +165,14 @@ impl Index<TcpStatistics> for TcpCounter {
 
     #[inline]
     fn index(&self, tcp_control: TcpStatistics) -> &usize {
-        &self.counter[tcp_control as usize]
+        &self.0[tcp_control as usize]
     }
 }
 
 impl IndexMut<TcpStatistics> for TcpCounter {
     #[inline]
     fn index_mut(&mut self, tcp_control: TcpStatistics) -> &mut usize {
-        &mut self.counter[tcp_control as usize]
+        &mut self.0[tcp_control as usize]
     }
 }
 
@@ -184,7 +180,7 @@ impl fmt::Display for TcpCounter {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         writeln!(f, "Tcp Counters: ",)?;
         for i in 0..TcpStatistics::Count as usize {
-            writeln!(f, "{:12} = {:6}", TcpStatistics::from(i), self.counter[i])?;
+            writeln!(f, "{:12} = {:6}", TcpStatistics::from(i), self.0[i])?;
         }
         Ok(())
     }

@@ -1,4 +1,4 @@
-use e2d2::utils;
+use std::arch::x86_64::_rdtsc;
 use std::clone::Clone;
 use std::cmp::min;
 use std::fmt::Debug;
@@ -92,7 +92,7 @@ where
     where
         T: Debug,
     {
-        let now = utils::rdtsc_unsafe();
+        let now = unsafe { _rdtsc() };
         //initialize start time
         if self.start == 0 {
             self.start = now - self.resolution_cycles;
@@ -139,7 +139,7 @@ mod tests {
         let system_data = SystemData::detect();
         let milli_to_cycles: u64 = system_data.cpu_clock / 1000;
 
-        let start = utils::rdtsc_unsafe();
+        let start = unsafe { _rdtsc() };
         println!("start = {:?}", start);
 
         let mut wheel: TimerWheel<u16> = TimerWheel::new(128, 16 * milli_to_cycles, 128);
@@ -154,7 +154,7 @@ mod tests {
         for _i in 0..1024 {
             // proceed with roughly 2 ms ticks
             thread::sleep(Duration::from_millis(2));
-            let now = utils::rdtsc_unsafe();
+            let now = unsafe { _rdtsc() };
             match wheel.tick(&now) {
                 (Some(mut drain), _more) => {
                     let event = drain.next();
@@ -177,7 +177,7 @@ mod tests {
         for _i in 0..1024 {
             // proceed with roughly 2 ms ticks
             thread::sleep(Duration::from_millis(2));
-            let now = utils::rdtsc_unsafe();
+            let now = unsafe { _rdtsc() };
             match wheel.tick(&now) {
                 (Some(mut drain), _more) => {
                     let event = drain.next();

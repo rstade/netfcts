@@ -226,7 +226,7 @@ where
 
         let matches = match opts.parse(&args[..]) {
             Ok(m) => m,
-            Err(f) => panic!(f.to_string()),
+            Err(f) => panic!("{}", f.to_string()),
         };
         let netbricks_configuration = read_matches(&matches, &opts);
 

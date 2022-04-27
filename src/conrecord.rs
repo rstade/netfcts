@@ -1,8 +1,8 @@
+use std::arch::x86_64::_rdtsc;
 use std::fmt;
 use std::net::{Ipv4Addr, SocketAddrV4};
 
 use separator::Separatable;
-use e2d2::utils as e2d2_utils;
 use recstore::Storable;
 use {TcpRole, TcpState, ReleaseCause, tcp_start_state};
 
@@ -63,7 +63,7 @@ impl ConRecord {
         self.base_stamp = 0;
         self.sent_payload_packets = 0;
         self.recv_payload_packets = 0;
-        self.uid = e2d2_utils::rdtsc_unsafe();
+        self.uid = unsafe { _rdtsc() };
         self.server_index = 0;
         let s = sock.unwrap_or((0, 0));
         self.client_ip = s.0;
@@ -164,10 +164,10 @@ impl HasTcpState for ConRecord {
     fn push_state(&mut self, state: TcpState) {
         self.state[self.state_count as usize] = state as u8;
         if self.state_count == 0 {
-            self.base_stamp = e2d2_utils::rdtsc_unsafe();
+            self.base_stamp = unsafe { _rdtsc() };
         } else {
             self.stamps[self.state_count as usize - 1] =
-                ((e2d2_utils::rdtsc_unsafe() - self.base_stamp) / TIME_STAMP_REDUCTION_FACTOR) as u32;
+                ((unsafe { _rdtsc() } - self.base_stamp) / TIME_STAMP_REDUCTION_FACTOR) as u32;
         }
         self.state_count += 1;
     }
